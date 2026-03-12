@@ -1,0 +1,20 @@
+# Credentials
+secrets.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# Local data & temporary files
+covers/
+*.png
+*.jpg
+*.jpeg
+*.md
+!README.md
+!requirements.txt
