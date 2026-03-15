@@ -1,12 +1,16 @@
 import os
+import argparse
+import sys
 import requests
-import markdown
 import json
 from bs4 import BeautifulSoup
 import mimetypes
 import time
 import re
+from pathlib import Path
 from dotenv import load_dotenv
+
+from markdown_utils import render_markdown_plain_text, render_markdown_soup
 
 # Load secret credentials from secrets.env
 load_dotenv("secrets.env")
@@ -16,6 +20,7 @@ SECRET = os.getenv("WECHAT_SECRET")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COVERS_DIR = os.path.join(BASE_DIR, "covers")
+WECHAT_MARKDOWN_EXTENSIONS = ["extra", "sane_lists"]
 
 # 7 张独立的水墨国画风封面图，每篇文章一张
 COVER_IMAGES = [
@@ -34,6 +39,8 @@ class WeChatPublisher:
         response = requests.get(url).json()
         if 'access_token' in response:
             return response['access_token']
+        elif response.get('errcode') == 40013:
+            raise Exception(f"微信公众号配置错误：WECHAT_APPID 无效，请检查 secrets.env 或环境变量。原始响应: {response}")
         elif response.get('errcode') == 40164:
             err_msg = response.get('errmsg', '')
             try:
@@ -111,9 +118,8 @@ class WeChatPublisher:
                 break
         clean_md_text = '\n'.join(lines[start_idx:])
 
-        # 去掉 nl2br，它会导致微信列表解析出多余空行
-        raw_html = markdown.markdown(clean_md_text, extensions=['extra', 'codehilite'])
-        soup = BeautifulSoup(raw_html, 'html.parser')
+        # 微信正文继续禁用 nl2br，避免列表里出现多余空行。
+        soup = render_markdown_soup(clean_md_text, extensions=WECHAT_MARKDOWN_EXTENSIONS)
 
         # 解决微信列表排版 BUG：如果 li 内嵌了 p，微信会产生多余的断行和空白序号
         for li in soup.find_all('li'):
@@ -210,8 +216,7 @@ class WeChatPublisher:
         html_content = self.md_to_wechat_html(md_content, md_file_path, top_image_url=cover_url)
         url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={self.access_token}"
 
-        digest_soup = BeautifulSoup(markdown.markdown(md_content), 'html.parser')
-        abstract = digest_soup.get_text()[:54].replace('\n', ' ').strip()
+        abstract = render_markdown_plain_text(md_content, extensions=WECHAT_MARKDOWN_EXTENSIONS)[:54].replace('\n', ' ').strip()
 
         payload = {
             "articles": [
@@ -229,9 +234,95 @@ class WeChatPublisher:
         res = requests.post(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'))
         return res.json()
 
+    def submit_publish(self, media_id):
+        url = f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={self.access_token}"
+        res = requests.post(
+            url,
+            data=json.dumps({"media_id": media_id}, ensure_ascii=False).encode("utf-8"),
+            timeout=60,
+        )
+        return res.json()
+
+    def get_publish_status(self, publish_id):
+        url = f"https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token={self.access_token}"
+        res = requests.post(
+            url,
+            data=json.dumps({"publish_id": publish_id}, ensure_ascii=False).encode("utf-8"),
+            timeout=60,
+        )
+        return res.json()
+
+
+def clean_title(title):
+    return re.sub(r'^\d{1,2}-\d{1,2}_', '', title).strip()
+
+
+def load_single_article(markdown_path):
+    path = Path(markdown_path).expanduser().resolve()
+    raw_text = path.read_text(encoding='utf-8')
+    title = clean_title(path.stem)
+    body = raw_text
+
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('# '):
+            title = clean_title(stripped[2:].strip())
+            body = raw_text.replace(line, '', 1).lstrip()
+            break
+
+    return title, body, str(path)
+
+
+def select_cover_for_path(markdown_file_path):
+    hash_value = sum(ord(ch) for ch in os.path.basename(markdown_file_path))
+    return COVER_IMAGES[hash_value % len(COVER_IMAGES)]
+
+
+def publish_one_article(publisher, markdown_file, mode):
+    title, md_content, md_file_path = load_single_article(markdown_file)
+    cover_path = select_cover_for_path(md_file_path)
+    cover_media_id, cover_url = publisher.upload_permanent_material(cover_path)
+    draft_result = publisher.publish_draft(title, md_content, md_file_path, cover_media_id, cover_url=cover_url)
+
+    if not (draft_result.get('errcode') == 0 or 'media_id' in draft_result):
+        raise Exception(f"微信草稿发布失败: {draft_result}")
+
+    media_id = draft_result.get('media_id')
+    print(f"[OK] 已写入微信公众号草稿: {media_id}")
+
+    if mode == "draft":
+        return
+
+    submit_result = publisher.submit_publish(media_id)
+    if submit_result.get("errcode") not in (None, 0):
+        raise Exception(f"微信提交发布失败: {submit_result}")
+
+    publish_id = submit_result.get("publish_id")
+    if not publish_id:
+        raise Exception(f"微信发布接口未返回 publish_id: {submit_result}")
+
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        status = publisher.get_publish_status(publish_id)
+        publish_status = status.get("publish_status")
+        if publish_status == 0:
+            article_id = status.get("article_id") or status.get("article_detail", {}).get("article_id")
+            print(f"[OK] 已发布到微信公众号: {article_id or publish_id}")
+            return
+        if publish_status == 1:
+            raise Exception(f"微信发布失败: {status}")
+        time.sleep(3)
+
+    raise Exception(f"微信发布状态轮询超时: {publish_id}")
+
 
 def main():
     try:
+        parser = argparse.ArgumentParser(description="Publish Markdown article to WeChat Official Account.")
+        parser.add_argument("markdown_file", nargs="?", help="Markdown article path")
+        parser.add_argument("--mode", choices=["draft", "publish"], default="draft")
+        args = parser.parse_args()
+
         print("=" * 50)
         print("  微信公众号自动发布引擎 v3.0")
         print("  公众号: 川上行远")
@@ -239,6 +330,10 @@ def main():
 
         publisher = WeChatPublisher(APPID, SECRET)
         print("[OK] Token 获取成功\n")
+
+        if args.markdown_file:
+            publish_one_article(publisher, args.markdown_file, args.mode)
+            return
 
         target_dir = r"D:\tiandiworkspace\拆解后文章"
         files = sorted([f for f in os.listdir(target_dir) if f.endswith('.md')])
@@ -253,7 +348,7 @@ def main():
         for idx in range(num_to_publish):
             target_file = files[idx]
             raw_title = os.path.splitext(target_file)[0]
-            title = re.sub(r'^[0-9-]*_', '', raw_title) # 去除前面的 11-06_ 等序号前缀
+            title = clean_title(raw_title)
             
             md_file_path = os.path.join(target_dir, target_file)
 
@@ -289,6 +384,7 @@ def main():
 
     except Exception as e:
         print(f"\n[ERROR] {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
