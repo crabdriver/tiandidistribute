@@ -1,0 +1,31 @@
+# Credentials
+secrets.env
+*.env
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# Local data & temporary files
+.worktrees/
+.tiandidistribute/
+covers/
+.firecrawl/
+.publish-workbench.json
+publish_records.csv
+.DS_Store
+*.png
+*.jpg
+*.jpeg
+*.md
+!README.md
+!README_EN.md
+!requirements.txt
+*.docx
+comment_state.json
+comment_reply.log

@@ -1,0 +1,33 @@
+{
+  "output_dir": "./.tiandidistribute/wechat-format",
+  "selected_theme_file": "./.tiandidistribute/wechat-format/selected-theme.txt",
+  "vault_root": "./my_articles",
+  "image_search_paths": [],
+  "settings": {
+    "default_theme": "newspaper",
+    "auto_open_browser": true,
+    "base_url": "CHANGE_ME_GEMINI_BASE_URL",
+    "model": "CHANGE_ME_GEMINI_IMAGE_MODEL",
+    "timeout_s": 120,
+    "max_retries": 1,
+    "retry_backoff_s": 2.0
+  },
+  "secrets": {
+    "api_key": "YOUR_API_KEY_HERE"
+  },
+  "ai": {
+    "url": "https://openrouter.ai/api/v1",
+    "api_key": "YOUR_API_KEY_HERE",
+    "model": "anthropic/claude-sonnet-4"
+  },
+  "wechat": {
+    "app_id": "YOUR_APP_ID",
+    "app_secret": "YOUR_APP_SECRET",
+    "author": "作者名"
+  },
+  "cover": {
+    "prefer_ai_first": true,
+    "output_dir": "./covers",
+    "image_size": "1024x1024"
+  }
+}
