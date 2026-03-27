@@ -2,7 +2,7 @@
 
 `ordo` is a local multi-platform publishing engine for Chinese-language creators. It treats Markdown as the single source of truth, then prepares and distributes the same article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, and similar platforms with far less repeated login, formatting, and copy-paste work.
 
-The current release is still centered on a local CLI workflow, but the official direction is to turn the project into a GUI-ready local publishing core and eventually ship it as a native desktop application for `macOS` and `Windows`.
+The current repository already includes a runnable desktop workbench MVP on top of the local CLI and engine workflow, and the official direction remains to harden that core into a native desktop application for `macOS` and `Windows`.
 
 The current automation boundary is explicit: `ordo` assumes the user already has valid platform login sessions, and the system handles article loading, content transformation, editor injection, draft or publish actions, result recording, and failure recovery. It does not promise automatic login, CAPTCHA handling, or anti-risk bypass behavior.
 
@@ -101,6 +101,68 @@ If you want to disable AI-first behavior:
 ```
 
 ## Quick Start
+
+### Desktop Workbench MVP
+
+The desktop workbench lives in `desktop/` and uses a `Tauri + Rust` shell on top of the Python publishing engine in the repository root.
+
+First start:
+
+```bash
+cd desktop
+npm install
+npm run tauri:dev
+```
+
+If your Python executable is not `python3`, set it before launch:
+
+```bash
+export ORDO_PYTHON=/path/to/python
+cd desktop
+npm run tauri:dev
+```
+
+Current desktop workbench coverage:
+
+- visual WeChat settings (`AppID` / `Secret` / `Author`)
+- top-level WeChat readiness status and blocking hint when credentials are missing
+- paste / single-file / folder import
+- theme-pool and cover-pool discovery
+- per-article theme override and non-WeChat cover override
+- Python bridge planning and streaming publish execution
+- `continue_on_error` passed through to publish planning
+- retry-only-failed-items flow after a failed run
+- structured result details and recent history refresh after publishing
+
+Cover-pool note:
+
+- non-WeChat platforms read the default local cover pool from `covers/`
+- you can override that path with `assignment.cover_dir` in `config.json`
+- the desktop UI now shows an explicit target directory when the cover pool is missing or empty
+
+### Desktop Packaging Preview
+
+The current desktop shell can already build a development preview bundle:
+
+```bash
+cd desktop
+npm run tauri:build
+```
+
+If you want the built shell to point to an explicit engine checkout, set:
+
+```bash
+export ORDO_REPO_ROOT=/path/to/tiandidistribute
+export ORDO_PYTHON=/path/to/python
+cd desktop
+npm run tauri:dev
+```
+
+Notes:
+
+- the current bundle is best treated as a developer preview, not a fully standalone installer with an embedded Python engine
+- `ORDO_REPO_ROOT` lets the desktop shell find `scripts/workbench_bridge.py` outside the original source launch layout
+- `tauri.conf.json` is still oriented toward `.app`-level output; Windows installer packaging remains a later step
 
 Preview a WeChat article locally:
 

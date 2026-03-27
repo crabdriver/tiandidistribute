@@ -1,0 +1,448 @@
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from tiandi_engine.platforms.base import BasePlatformAdapter
+
+
+class DummyAdapter(BasePlatformAdapter):
+    def __init__(self, base_dir, platform, returncode=0, stdout="", stderr=""):
+        super().__init__(base_dir=base_dir, platform=platform)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def prepare(
+        self,
+        markdown_file,
+        mode,
+        theme_name=None,
+        cover_path=None,
+        template_mode=None,
+        article_id=None,
+    ):
+        return {
+            "platform": self.platform,
+            "markdown_file": str(markdown_file),
+            "mode": mode,
+            "theme_name": theme_name,
+            "cover_path": cover_path,
+            "template_mode": template_mode,
+            "article_id": article_id,
+        }
+
+    def publish(self, prepared_context):
+        return {
+            "platform": self.platform,
+            "command": f"dummy {self.platform} {prepared_context['markdown_file']}",
+            "returncode": self.returncode,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+        }
+
+    def verify(self, process_result, mode):
+        if process_result["returncode"] != 0:
+            return "failed"
+        return "draft_only" if mode == "draft" else "published"
+
+    def collect_result(self, process_result, mode):
+        from tiandi_engine.results.record import ExecutionResult
+
+        return ExecutionResult(
+            platform=self.platform,
+            stage="publish",
+            status=self.verify(process_result, mode),
+            summary=process_result["stderr"] or process_result["stdout"] or "ok",
+            stdout=process_result["stdout"],
+            stderr=process_result["stderr"],
+            retryable=False,
+        )
+
+
+class WorkbenchBridgeTests(unittest.TestCase):
+    def test_import_sources_supports_file_folder_and_paste(self):
+        from tiandi_engine.workbench.bridge import import_sources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            md_path = base / "single.md"
+            md_path.write_text("# 标题\n\n正文", encoding="utf-8")
+            folder = base / "folder"
+            folder.mkdir()
+            (folder / "a.txt").write_text("标题A\n\n正文A", encoding="utf-8")
+            (folder / "b.md").write_text("# 标题B\n\n正文B", encoding="utf-8")
+
+            single = import_sources(base, import_mode="file", source_path=str(md_path))
+            batch = import_sources(base, import_mode="folder", source_path=str(folder))
+            pasted = import_sources(base, import_mode="paste", pasted_text="粘贴标题\n\n粘贴正文")
+
+        self.assertEqual(single["job"]["article_count"], 1)
+        self.assertEqual(batch["job"]["article_count"], 2)
+        self.assertEqual(batch["job"]["drafts"][0]["title"], "标题A")
+        self.assertEqual(pasted["job"]["drafts"][0]["source_kind"], "paste")
+
+    def test_discover_resources_returns_theme_and_cover_pool_details(self):
+        from tiandi_engine.workbench.bridge import discover_resources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "themes").mkdir()
+            (base / "themes" / "night.json").write_text('{"name": "Night Theme"}', encoding="utf-8")
+            (base / "covers").mkdir()
+            (base / "covers" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            payload = discover_resources(base)
+
+        self.assertEqual(payload["theme_pool"]["count"], 1)
+        self.assertEqual(payload["theme_pool"]["entries"][0]["theme_id"], "night")
+        self.assertTrue(payload["cover_pool"]["ok"])
+        self.assertEqual(payload["cover_pool"]["count"], 1)
+
+    def test_plan_publish_job_creates_assignments_and_staged_markdown(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "themes").mkdir()
+            (base / "themes" / "night.json").write_text('{"name": "Night Theme"}', encoding="utf-8")
+            (base / "covers").mkdir()
+            (base / "covers" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            imported = import_sources(base, import_mode="paste", pasted_text="桥接标题\n\n桥接正文")
+            plan = plan_publish_job(
+                base,
+                drafts=imported["job"]["drafts"],
+                platforms=["wechat", "zhihu"],
+                mode="draft",
+                seed=1,
+            )
+
+            self.assertEqual(plan["publish_job"]["platforms"], ["wechat", "zhihu"])
+            self.assertEqual(len(plan["template_assignments"]), 1)
+            self.assertEqual(len(plan["cover_assignments"]), 1)
+            staged_path = Path(plan["staged_articles"][0]["markdown_path"])
+            self.assertTrue(staged_path.is_file())
+            self.assertIn("桥接标题", staged_path.read_text(encoding="utf-8"))
+            self.assertTrue(any(item["platform"] == "zhihu" for item in plan["context_map"]))
+
+    def test_run_publish_job_emits_structured_events(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job, run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "themes").mkdir()
+            (base / "themes" / "night.json").write_text('{"name": "Night Theme"}', encoding="utf-8")
+            imported = import_sources(base, import_mode="paste", pasted_text="执行标题\n\n执行正文")
+            plan = plan_publish_job(
+                base,
+                drafts=imported["job"]["drafts"],
+                platforms=["wechat"],
+                mode="draft",
+            )
+            registry = {
+                "wechat": DummyAdapter(base, "wechat", returncode=0, stdout="ok"),
+            }
+
+            result = run_publish_job(base, plan, registry=registry)
+
+        event_types = [event["type"] for event in result["events"]]
+        self.assertEqual(event_types[0], "job_started")
+        self.assertIn("platform_started", event_types)
+        self.assertIn("platform_finished", event_types)
+        self.assertEqual(event_types[-1], "job_finished")
+        self.assertEqual(result["publish_job"]["success_count"], 1)
+        self.assertEqual(result["results"][0]["status"], "draft_only")
+
+    def test_run_publish_job_supports_sparse_context_map_for_retry_plans(self):
+        from tiandi_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            a1 = base / "a1.md"
+            a2 = base / "a2.md"
+            a1.write_text("# A1\n\nbody", encoding="utf-8")
+            a2.write_text("# A2\n\nbody", encoding="utf-8")
+            registry = {
+                "wechat": DummyAdapter(base, "wechat", returncode=0, stdout="ok"),
+                "zhihu": DummyAdapter(base, "zhihu", returncode=0, stdout="ok"),
+            }
+            sparse_plan = {
+                "publish_job": {
+                    "job_id": "retry-job",
+                    "article_ids": ["a1", "a2"],
+                    "platforms": ["wechat", "zhihu"],
+                    "status": "pending",
+                    "current_step": "",
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "skip_count": 0,
+                    "recoverable": True,
+                    "error_summary": "",
+                },
+                "mode": "draft",
+                "continue_on_error": True,
+                "drafts": [
+                    {"article_id": "a1", "title": "A1", "body_markdown": "# A1", "source_path": None, "source_kind": "markdown"},
+                    {"article_id": "a2", "title": "A2", "body_markdown": "# A2", "source_path": None, "source_kind": "markdown"},
+                ],
+                "staged_articles": [
+                    {"article_id": "a1", "markdown_path": str(a1)},
+                    {"article_id": "a2", "markdown_path": str(a2)},
+                ],
+                "context_map": [
+                    {
+                        "article_id": "a1",
+                        "platform": "zhihu",
+                        "markdown_path": str(a1),
+                        "theme_name": None,
+                        "template_mode": "default",
+                        "cover_path": None,
+                    },
+                    {
+                        "article_id": "a2",
+                        "platform": "wechat",
+                        "markdown_path": str(a2),
+                        "theme_name": None,
+                        "template_mode": "default",
+                        "cover_path": None,
+                    },
+                ],
+            }
+
+            result = run_publish_job(base, sparse_plan, registry=registry)
+
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual([item["platform"] for item in result["results"]], ["zhihu", "wechat"])
+
+    def test_run_publish_job_uses_failed_summary_when_continue_on_error_finishes_late_success(self):
+        from tiandi_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            article = base / "article.md"
+            article.write_text("# Title\n\nbody", encoding="utf-8")
+            registry = {
+                "wechat": DummyAdapter(base, "wechat", returncode=1, stderr="wechat failed"),
+                "zhihu": DummyAdapter(base, "zhihu", returncode=0, stdout="zhihu ok"),
+            }
+            plan = {
+                "publish_job": {
+                    "job_id": "job-summary",
+                    "article_ids": ["article"],
+                    "platforms": ["wechat", "zhihu"],
+                    "status": "pending",
+                    "current_step": "",
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "skip_count": 0,
+                    "recoverable": True,
+                    "error_summary": "",
+                },
+                "mode": "draft",
+                "continue_on_error": True,
+                "drafts": [
+                    {"article_id": "article", "title": "Title", "body_markdown": "# Title", "source_path": None, "source_kind": "markdown"}
+                ],
+                "staged_articles": [{"article_id": "article", "markdown_path": str(article)}],
+                "context_map": [
+                    {
+                        "article_id": "article",
+                        "platform": "wechat",
+                        "markdown_path": str(article),
+                        "theme_name": None,
+                        "template_mode": "default",
+                        "cover_path": None,
+                    },
+                    {
+                        "article_id": "article",
+                        "platform": "zhihu",
+                        "markdown_path": str(article),
+                        "theme_name": None,
+                        "template_mode": "default",
+                        "cover_path": None,
+                    },
+                ],
+            }
+
+            result = run_publish_job(base, plan, registry=registry)
+
+        self.assertEqual(result["publish_job"]["status"], "failed")
+        self.assertIn("wechat failed", result["publish_job"]["error_summary"])
+
+    def test_read_recent_history_reads_records_and_session_snapshot(self):
+        from tiandi_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            records = base / "publish_records.csv"
+            records.write_text(
+                "timestamp,article,article_id,platform,mode,theme_name,template_mode,cover_path,status,error_type,returncode,stdout,stderr\n"
+                "2026-03-27 12:00:00,/tmp/a.md,a1,zhihu,draft,night,default,/tmp/c.png,draft_only,,0,ok,\n",
+                encoding="utf-8",
+            )
+            session_dir = base / ".tiandidistribute" / "publish-console"
+            session_dir.mkdir(parents=True)
+            (session_dir / "publish-console-session.json").write_text(
+                '{"summary":{"total_articles":1},"items":[{"article_id":"a1"}]}',
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertEqual(len(history["records"]), 1)
+        self.assertEqual(history["records"][0]["platform"], "zhihu")
+        self.assertEqual(history["session"]["summary"]["total_articles"], 1)
+
+    def test_handle_bridge_command_routes_json_requests(self):
+        from tiandi_engine.workbench.bridge import handle_bridge_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            response = handle_bridge_command(
+                base,
+                {
+                    "command": "import_sources",
+                    "import_mode": "paste",
+                    "pasted_text": "命令标题\n\n命令正文",
+                },
+            )
+
+        self.assertIn("job", response)
+        self.assertEqual(response["job"]["drafts"][0]["title"], "命令标题")
+
+    def test_read_wechat_settings_returns_empty_values_when_missing(self):
+        from tiandi_engine.workbench.bridge import read_wechat_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = read_wechat_settings(Path(tmp))
+
+        self.assertEqual(payload["app_id"], "")
+        self.assertEqual(payload["secret"], "")
+        self.assertEqual(payload["author"], "")
+        self.assertFalse(payload["status"]["appid_ready"])
+        self.assertFalse(payload["status"]["secret_ready"])
+
+    def test_save_wechat_settings_persists_values_and_preserves_other_lines(self):
+        from tiandi_engine.workbench.bridge import read_wechat_settings, save_wechat_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            env_path = base / "secrets.env"
+            env_path.write_text("# keep\nOTHER_KEY=1\nWECHAT_APPID=old\n", encoding="utf-8")
+
+            saved = save_wechat_settings(
+                base,
+                app_id="wx_app_123",
+                secret="secret_456",
+                author="Wizard",
+            )
+            reread = read_wechat_settings(base)
+            content = env_path.read_text(encoding="utf-8")
+
+        self.assertEqual(saved["app_id"], "wx_app_123")
+        self.assertEqual(reread["secret"], "secret_456")
+        self.assertEqual(reread["author"], "Wizard")
+        self.assertIn("# keep", content)
+        self.assertIn("OTHER_KEY=1", content)
+        self.assertIn("WECHAT_APPID=wx_app_123", content)
+        self.assertIn("WECHAT_SECRET=secret_456", content)
+        self.assertIn("WECHAT_AUTHOR=Wizard", content)
+
+    def test_discover_resources_includes_wechat_status(self):
+        from tiandi_engine.workbench.bridge import discover_resources, save_wechat_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            payload_before = discover_resources(base)
+            save_wechat_settings(base, app_id="wx_1", secret="sec_1", author="A")
+            payload_after = discover_resources(base)
+
+        self.assertIn("wechat", payload_before)
+        self.assertFalse(payload_before["wechat"]["status"]["appid_ready"])
+        self.assertTrue(payload_after["wechat"]["status"]["appid_ready"])
+        self.assertEqual(payload_after["wechat"]["settings"]["author"], "A")
+
+    def test_handle_bridge_command_routes_wechat_setting_commands(self):
+        from tiandi_engine.workbench.bridge import handle_bridge_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            save_response = handle_bridge_command(
+                base,
+                {
+                    "command": "save_wechat_settings",
+                    "app_id": "wx_test",
+                    "secret": "sec_test",
+                    "author": "author_test",
+                },
+            )
+            read_response = handle_bridge_command(base, {"command": "read_wechat_settings"})
+
+        self.assertEqual(save_response["app_id"], "wx_test")
+        self.assertEqual(read_response["secret"], "sec_test")
+
+    def test_stream_bridge_appends_publish_records_for_desktop_runs(self):
+        import publish
+        from scripts import workbench_bridge as bridge_script
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            records_path = base / "publish_records.csv"
+            stdin = io.StringIO(json.dumps({"command": "run_publish_job_stream", "plan": {"publish_job": {"job_id": "job-1"}}}))
+            stdout = io.StringIO()
+
+            def fake_run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None, event_sink=None):
+                result = {
+                    "article": str(base / "article.md"),
+                    "article_id": "article-1",
+                    "platform": "wechat",
+                    "mode": "draft",
+                    "theme_name": "",
+                    "template_mode": "default",
+                    "cover_path": "",
+                    "status": "draft_only",
+                    "error_type": None,
+                    "returncode": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "summary": "ok",
+                    "retryable": False,
+                }
+                if event_sink:
+                    event_sink({"type": "job_started", "job_id": "job-1"})
+                if append_record:
+                    append_record(result)
+                return {
+                    "publish_job": {
+                        "job_id": "job-1",
+                        "status": "completed",
+                        "success_count": 1,
+                        "failure_count": 0,
+                        "skip_count": 0,
+                        "recoverable": True,
+                        "error_summary": "",
+                        "current_step": "done",
+                    },
+                    "events": [{"type": "job_started", "job_id": "job-1"}],
+                    "results": [result],
+                }
+
+            with patch.object(bridge_script, "ROOT_DIR", base), patch.object(
+                publish, "PUBLISH_RECORDS_FILE", records_path
+            ), patch("sys.stdin", stdin), patch("sys.stdout", stdout), patch(
+                "tiandi_engine.workbench.bridge.run_publish_job", side_effect=fake_run_publish_job
+            ):
+                bridge_script.main()
+
+            self.assertTrue(records_path.exists())
+            content = records_path.read_text(encoding="utf-8")
+            self.assertIn("article_id", content)
+            self.assertIn("article-1", content)
+            self.assertIn('"type": "command_result"', stdout.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

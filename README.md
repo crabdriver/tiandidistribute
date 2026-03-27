@@ -2,7 +2,7 @@
 
 `ordo` 是一个面向中文内容创作者的本地多平台自动发布引擎。它以 Markdown 为单一内容源，负责把同一篇文章整理并分发到微信、知乎、头条号、简书、一点号等平台，目标是减少重复登录、重复排版和重复复制粘贴。
 
-当前版本仍以本地 CLI 工作流为主，但项目的正式演进方向是整理成可被 GUI 直接调用的本地发布内核，并最终封装成可在 `macOS` 和 `Windows` 上一键安装的原生桌面软件。
+当前仓库已经包含一个可运行的桌面工作台 MVP，同时仍保留本地 CLI 工作流；项目的正式演进方向是继续把这套本地发布内核打磨稳定，并最终封装成可在 `macOS` 和 `Windows` 上一键安装的原生桌面软件。
 
 自动化边界目前定义为：默认依赖用户已经存在的登录态，系统负责文章装载、内容转换、平台注入、草稿或发布、结果记录和失败恢复；不承诺自动登录、验证码处理或风控绕过。
 
@@ -103,6 +103,77 @@ cp config.example.json config.json
 ```
 
 ## 快速开始
+
+### 桌面工作台 MVP
+
+桌面工作台位于 `desktop/`，采用 `Tauri + Rust` 桌面壳，底层继续调用仓库根目录下的 Python 发布引擎。
+
+首次启动：
+
+```bash
+cd desktop
+npm install
+npm run tauri:dev
+```
+
+如果你的 Python 不在 `python3`，可在启动前指定：
+
+```bash
+export ORDO_PYTHON=/path/to/python
+cd desktop
+npm run tauri:dev
+```
+
+桌面工作台当前已打通的主链路：
+
+- 顶部 `设置` 弹窗可直接填写微信 `AppID` / `Secret` / `Author`
+- 微信配置状态会在顶部即时显示，未配置时会阻止微信发布并给出明确提示
+- 粘贴 / 单文件 / 文件夹导入
+- 主题池 / 封面池发现
+- 逐篇模板覆盖与非微信封面覆盖
+- 调用 Python bridge 创建发布计划
+- `遇错继续` 开关会透传到引擎侧发布计划
+- 失败后可切换到“仅重试失败项”的最小续跑计划
+- 发起发布并实时回看结构化日志
+- 发布后可直接查看平台级结果详情与失败摘要
+- 读取最近发布记录与最近 session 快照
+
+封面接入补充说明：
+
+- 非微信平台默认从仓库根目录 `covers/` 读取本地封面池
+- 如果你想改目录，可在 `config.json` 里设置 `assignment.cover_dir`
+- 当前工作台会在封面池不可用时直接提示目标目录，而不是静默跳过
+
+推荐首次使用顺序：
+
+1. 打开桌面工作台
+2. 点击顶部 `设置`
+3. 填写微信 `AppID`、`Secret`、`Author`
+4. 保存后再开始导入文章并发布
+
+### 桌面打包预览
+
+当前桌面壳已经可以构建开发预览包：
+
+```bash
+cd desktop
+npm run tauri:build
+```
+
+如果你希望把构建出来的桌面壳指向一个明确的引擎仓库目录，可在启动前设置：
+
+```bash
+export ORDO_REPO_ROOT=/path/to/tiandidistribute
+export ORDO_PYTHON=/path/to/python
+cd desktop
+npm run tauri:dev
+```
+
+说明：
+
+- 当前打包产物更适合作为“开发预览 / 内测包”，尚不是完全独立、内嵌 Python 引擎的一键安装版
+- `ORDO_REPO_ROOT` 用于让桌面壳在非源码目录启动时，仍能找到 `scripts/workbench_bridge.py`
+- 当前 `tauri.conf.json` 仍以 `.app` 级别产物为主，Windows 安装器与正式分发流程仍属于后续阶段
 
 ### 微信本地预览
 

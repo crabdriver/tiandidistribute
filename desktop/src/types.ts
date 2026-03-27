@@ -1,0 +1,162 @@
+export type Platform = 'wechat' | 'zhihu' | 'toutiao' | 'jianshu' | 'yidian'
+export type PublishMode = 'draft' | 'publish'
+export type TemplateMode = 'default' | 'custom'
+
+export interface ArticleDraft {
+  article_id: string
+  title: string
+  body_markdown: string
+  source_path: string | null
+  source_kind: string
+  image_paths: string[]
+  word_count: number
+  template_mode: string
+  theme_name: string | null
+  is_config_complete: boolean
+}
+
+export interface ImportJob {
+  job_id: string
+  import_mode: string
+  source_path: string | null
+  pasted_preview: string | null
+  imported_at: string
+  article_count: number
+  drafts: ArticleDraft[]
+}
+
+export interface ThemeEntry {
+  theme_id: string
+  display_name: string
+}
+
+export interface ThemePool {
+  themes_dir: string
+  theme_ids: string[]
+  count: number
+  entries: ThemeEntry[]
+}
+
+export interface CoverPool {
+  ok: boolean
+  cover_dir: string
+  paths: string[]
+  count: number
+  error: string | null
+}
+
+export interface WechatConfigStatus {
+  env_file_exists: boolean
+  appid_ready: boolean
+  secret_ready: boolean
+  covers_ready: boolean
+  cover_count: number
+  ai_cover_ready: boolean
+}
+
+export interface WechatSettings {
+  app_id: string
+  secret: string
+  author: string
+}
+
+export interface WechatSettingsPayload extends WechatSettings {
+  status: WechatConfigStatus
+}
+
+export interface BridgeResources {
+  theme_pool: ThemePool
+  cover_pool: CoverPool
+  wechat: {
+    settings: WechatSettings
+    status: WechatConfigStatus
+  }
+  defaults: {
+    template_mode: string
+    cover_repeat_window: number
+  }
+}
+
+export interface TemplateAssignment {
+  article_id: string
+  template_mode: string
+  theme_id: string | null
+  theme_name: string | null
+  is_random: boolean
+  is_manual_override: boolean
+  is_confirmed: boolean
+}
+
+export interface CoverAssignment {
+  article_id: string
+  platform: Platform
+  cover_path: string | null
+  cover_source: string
+  is_random: boolean
+  is_manual_override: boolean
+}
+
+export interface PublishJob {
+  job_id: string
+  article_ids: string[]
+  platforms: Platform[]
+  status: string
+  current_step: string
+  success_count: number
+  failure_count: number
+  skip_count: number
+  recoverable: boolean
+  error_summary: string
+}
+
+export interface StagedArticle {
+  article_id: string
+  markdown_path: string
+}
+
+export interface PublishContext {
+  article_id: string
+  platform: Platform
+  markdown_path: string
+  theme_name: string | null
+  template_mode: string
+  cover_path: string | null
+}
+
+export interface PublishPlan {
+  publish_job: PublishJob
+  mode: PublishMode
+  continue_on_error: boolean
+  drafts: ArticleDraft[]
+  template_assignments: TemplateAssignment[]
+  cover_assignments: CoverAssignment[]
+  staged_articles: StagedArticle[]
+  context_map: PublishContext[]
+  resources: BridgeResources
+}
+
+export interface PublishResult {
+  publish_job: PublishJob
+  events: PublishEvent[]
+  results: Array<Record<string, unknown>>
+}
+
+export interface HistoryPayload {
+  records: Array<Record<string, string>>
+  session: Record<string, unknown> | null
+}
+
+export interface PublishEvent {
+  type: string
+  job_id: string
+  article_id?: string
+  platform?: Platform
+  title?: string
+  markdown_path?: string
+  result?: Record<string, unknown>
+  publish_job?: PublishJob
+  result_count?: number
+  article_ids?: string[]
+  platforms?: Platform[]
+  mode?: PublishMode
+}

@@ -14,6 +14,8 @@ CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 YIDIAN_MATCH = "mp.yidianzixun.com"
 YIDIAN_EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
 YIDIAN_COVER_FILE_INPUT = ".upload-input"
+YIDIAN_SINGLE_COVER_TEXT = "单图"
+YIDIAN_AI_DECLARATION = "内容由AI生成"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 
 
@@ -31,6 +33,10 @@ def run_cdp(command, *args, timeout=120):
         timeout=timeout,
     )
     return result.stdout.strip()
+
+
+def normalize_ui_text(text):
+    return "".join((text or "").split())
 
 
 def list_yidian_targets():
@@ -221,34 +227,64 @@ def apply_cover(target_id, cover_path):
     path = Path(cover_path).expanduser().resolve()
     if not path.is_file():
         raise RuntimeError(f"封面文件不存在: {path}")
+    mode_result = select_cover_type(target_id, YIDIAN_SINGLE_COVER_TEXT)
+    if not wait_for_cover_type(target_id, YIDIAN_SINGLE_COVER_TEXT, timeout_seconds=8):
+        raise RuntimeError(f"一点号封面未切换到单图: {mode_result}")
     run_cdp("setfile", target_id, YIDIAN_COVER_FILE_INPUT, str(path))
+    if not wait_for_cover_upload(target_id, timeout_seconds=12):
+        raise RuntimeError(f"一点号封面上传后未检测到预览或成功状态: {path.name}")
     print(f"[INFO] 已向一点号封面上传控件注入文件: {path}")
 
 
-def select_default_cover(target_id):
-    expression = """
-(() => {
+def select_cover_type(target_id, option_text):
+    option_json = json.dumps(option_text, ensure_ascii=False)
+    expression = f"""
+(() => {{
   const items = Array.from(document.querySelectorAll('.cover-type .item'));
-  const defaultItem = items.find((item) => item.innerText.trim() === '默认');
-  if (!defaultItem) {
-    return 'default-cover-not-found';
-  }
-  defaultItem.click();
-  return Array.from(document.querySelectorAll('.cover-type .item')).map((item) => ({
+  const targetItem = items.find((item) => (item.innerText || '').replace(/\s+/g, '') === {option_json}.replace(/\s+/g, ''));
+  if (!targetItem) {{
+    return 'cover-option-not-found';
+  }}
+  targetItem.click();
+  return Array.from(document.querySelectorAll('.cover-type .item')).map((item) => ({{
     text: item.innerText.trim(),
     checked: item.classList.contains('checked')
-  }));
-})()
+  }}));
+}})()
 """
     return run_cdp("eval", target_id, expression)
 
 
+def wait_for_cover_type(target_id, option_text, timeout_seconds=10, interval_seconds=1):
+    option_json = json.dumps(option_text, ensure_ascii=False)
+    expression = f"""
+(() => {{
+  const items = Array.from(document.querySelectorAll('.cover-type .item'));
+  const targetItem = items.find((item) => (item.innerText || '').replace(/\s+/g, '') === {option_json}.replace(/\s+/g, ''));
+  return !!targetItem && targetItem.classList.contains('checked');
+}})()
+"""
+    return wait_until(target_id, expression, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
+
+
+def select_default_cover(target_id):
+    return select_cover_type(target_id, "默认")
+
+
 def wait_for_default_cover(target_id, timeout_seconds=10, interval_seconds=1):
+    return wait_for_cover_type(target_id, "默认", timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
+
+
+def wait_for_cover_upload(target_id, timeout_seconds=10, interval_seconds=1):
     expression = """
 (() => {
-  const items = Array.from(document.querySelectorAll('.cover-type .item'));
-  const defaultItem = items.find((item) => item.innerText.trim() === '默认');
-  return !!defaultItem && defaultItem.classList.contains('checked');
+  const root = document.querySelector('.cover-content, .cover-wrap, .cover-box, .cover-type') || document.body;
+  const hasPreview = !!root.querySelector(
+    'img, .cover-preview img, .preview img, .upload-list img, .cover-box img, [style*="background-image"]'
+  );
+  const bodyText = (root.innerText || document.body.innerText || '').replace(/\s+/g, '');
+  const hasSuccessText = ['更换封面', '重新上传', '裁剪', '删除', '预览'].some(text => bodyText.includes(text));
+  return hasPreview || hasSuccessText;
 })()
 """
     return wait_until(target_id, expression, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
@@ -283,60 +319,37 @@ def wait_for_any_text(target_id, texts, timeout_seconds=20, interval_seconds=1):
 
 
 def attempt_ai_declaration(target_id):
-    keywords_json = json.dumps(AI_KEYWORDS, ensure_ascii=False)
+    target_json = json.dumps(YIDIAN_AI_DECLARATION, ensure_ascii=False)
     expression = (
         "(() => {"
-        "  const keywords = " + keywords_json + ";"
-        "  const selectors = 'label, input[type=checkbox], span, div, button, [role=checkbox], [role=switch]';"
-        "  const els = Array.from(document.querySelectorAll(selectors));"
-        "  const candidates = els.filter(el => {"
-        "    const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();"
-        "    return keywords.some(kw => text.includes(kw));"
-        "  });"
-        "  if (candidates.length === 0) return JSON.stringify({found: false});"
-        "  const el = candidates[0];"
-        "  const tag = el.tagName.toLowerCase();"
-        "  const text = (el.innerText || el.textContent || '').trim();"
-        "  try {"
-        "    if (tag === 'input' && el.type === 'checkbox') {"
-        "      if (!el.checked) el.click();"
-        "      return JSON.stringify({found: true, checked: el.checked, tag: tag, text: text});"
-        "    }"
-        "    const inner = el.querySelector('input[type=checkbox]');"
-        "    if (inner) {"
-        "      if (!inner.checked) inner.click();"
-        "      return JSON.stringify({found: true, checked: inner.checked, tag: tag, text: text});"
-        "    }"
-        "    const role = el.getAttribute('role');"
-        "    if (role === 'checkbox' || role === 'switch') {"
-        "      el.click();"
-        "      const checked = el.getAttribute('aria-checked') === 'true';"
-        "      return JSON.stringify({found: true, checked: checked, tag: tag, text: text});"
-        "    }"
-        "    el.click();"
-        "    return JSON.stringify({found: true, checked: true, tag: tag, text: text});"
-        "  } catch(e) {"
-        "    return JSON.stringify({found: true, checked: false, tag: tag, text: text, error: e.message});"
-        "  }"
+        "  const targetText = " + target_json + ";"
+        "  const normalize = (text) => (text || '').replace(/\\s+/g, '');"
+        "  const selectors = '.content-claim label, .content-claim .item, label, .item, [role=radio], [role=checkbox], span, div';"
+        "  const nodes = Array.from(document.querySelectorAll(selectors));"
+        "  const target = nodes.find(node => normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '') === normalize(targetText));"
+        "  if (!target) return JSON.stringify({found: false});"
+        "  const readChecked = () => !!("
+        "    target.classList.contains('checked') ||"
+        "    target.getAttribute('aria-checked') === 'true' ||"
+        "    target.querySelector('input:checked') ||"
+        "    target.querySelector('.checked')"
+        "  );"
+        "  if (readChecked()) return JSON.stringify({found: true, checked: true, already: true});"
+        "  target.click();"
+        "  return JSON.stringify({found: true, checked: readChecked(), already: false, text: (target.innerText || target.textContent || '').trim()});"
         "})()"
     )
-    try:
-        raw = run_cdp("eval", target_id, expression)
-        result = json.loads(raw)
-    except Exception:
-        print("[WARN] 一点号未发现 AI 创作声明入口，跳过")
-        return None
+    raw = run_cdp("eval", target_id, expression)
+    result = json.loads(raw)
 
     if not result.get("found"):
-        print("[WARN] 一点号未发现 AI 创作声明入口，跳过")
-        return None
+        raise RuntimeError(f"一点号未找到内容声明选项「{YIDIAN_AI_DECLARATION}」")
 
     if result.get("checked"):
         print(f"[INFO] 一点号 AI 创作声明已勾选: {result}")
-    else:
-        print(f"[WARN] 一点号 AI 创作声明勾选可能未生效: {result}")
+        return result
 
-    return result
+    raise RuntimeError(f"一点号内容声明「{YIDIAN_AI_DECLARATION}」勾选失败: {result}")
 
 
 def detect_publish_limit(target_id):

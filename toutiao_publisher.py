@@ -59,6 +59,10 @@ def run_cdp(command, *args, timeout=120):
             raise RuntimeError(output or f"CDP call failed: {command} {args}")
 
 
+def normalize_ui_text(text):
+    return "".join((text or "").split())
+
+
 def find_toutiao_target():
     bound_target = os.environ.get("PUBLISH_TARGET_TOUTIAO")
     if bound_target:
@@ -230,6 +234,24 @@ def apply_cover(target_id, cover_path):
     run_cdp("click", target_id, ".article-cover-add")
     time.sleep(0.7)
     run_cdp("setfile", target_id, TOUTIAO_COVER_FILE_INPUT, str(path))
+    uploaded = wait_until(
+        target_id,
+        """
+(() => {
+  const coverRoot = document.querySelector('.cover-component, .article-cover, .article-cover-wrap, .article-cover-list') || document.body;
+  const hasPreview = !!coverRoot.querySelector(
+    'img, .article-cover-item img, .article-cover-preview img, .byte-upload-list-item img, .upload-list-item img, [style*="background-image"]'
+  );
+  const bodyText = (coverRoot.innerText || document.body.innerText || '').replace(/\s+/g, '');
+  const hasSuccessText = ['更换封面', '重新上传', '裁剪', '裁切', '封面管理', '删除'].some(text => bodyText.includes(text));
+  return hasPreview || hasSuccessText;
+})()
+""".strip(),
+        timeout_seconds=12,
+        interval_seconds=1,
+    )
+    if not uploaded:
+        raise RuntimeError(f"头条封面上传后未检测到预览或成功状态: {path.name}")
     print(f"[INFO] 已向头条封面控件注入文件: {path}")
 
 
@@ -343,7 +365,7 @@ def wait_for_any_text(target_id, texts, timeout_seconds=20, interval_seconds=1):
 
 
 def attempt_ai_declaration(target_id):
-    """在「作品声明」区域勾选「引用AI」复选框（best-effort）。"""
+    """在「作品声明」区域精确勾选「引用AI」并做结果校验。"""
     expand_expression = """
 (() => {
   if ((document.body.innerText || '').includes('作品声明')) return 'already-open';
@@ -355,44 +377,39 @@ def attempt_ai_declaration(target_id):
   return 'skip';
 })()
 """.strip()
-    try:
-        expand_result = run_cdp("eval", target_id, expand_expression)
-        if expand_result == "expanded":
-            time.sleep(1)
-    except Exception:
-        pass
+    expand_result = run_cdp("eval", target_id, expand_expression)
+    if expand_result == "expanded":
+        time.sleep(1)
+    elif expand_result not in {"already-open", "skip"}:
+        raise RuntimeError(f"头条作品声明区域展开失败: {expand_result}")
 
     label_json = json.dumps(AI_CHECKBOX_LABEL, ensure_ascii=False)
     check_expression = f"""
 (() => {{
-  const labels = document.querySelectorAll('.byte-checkbox-group .byte-checkbox');
-  for (const lb of labels) {{
-    if ((lb.innerText || '').includes({label_json})) {{
-      const input = lb.querySelector('input[type=checkbox]');
-      if (input && input.checked) {{
-        return JSON.stringify({{found: true, checked: true, already: true}});
-      }}
-      lb.click();
-      const checked = lb.querySelector('input[type=checkbox]')?.checked;
-      return JSON.stringify({{found: true, checked: !!checked, already: false}});
-    }}
+  const normalize = (text) => (text || '').replace(/\s+/g, '');
+  const labels = Array.from(document.querySelectorAll('.byte-checkbox-group .byte-checkbox, label, .byte-checkbox'));
+  const lb = labels.find(node => normalize(node.innerText || node.textContent || '') === normalize({label_json}));
+  if (!lb) return JSON.stringify({{found: false}});
+  const input = lb.querySelector('input[type=checkbox]');
+  const isChecked = () => !!(
+    input?.checked ||
+    lb.classList.contains('checked') ||
+    lb.querySelector('.byte-checkbox-input-checked, .checked')
+  );
+  if (isChecked()) {{
+    return JSON.stringify({{found: true, checked: true, already: true}});
   }}
-  return JSON.stringify({{found: false}});
+  lb.click();
+  return JSON.stringify({{found: true, checked: isChecked(), already: false}});
 }})()
 """.strip()
-    try:
-        raw = run_cdp("eval", target_id, check_expression)
-        if not raw:
-            print("[WARN] AI创作声明: 未获取到返回值，跳过")
-            return None
-        result = json.loads(raw)
-    except Exception:
-        print("[WARN] AI创作声明: 执行异常，跳过")
-        return None
+    raw = run_cdp("eval", target_id, check_expression)
+    if not raw:
+        raise RuntimeError("头条 AI 创作声明未返回校验结果")
+    result = json.loads(raw)
 
     if not result.get("found"):
-        print('[WARN] AI创作声明: 未找到「引用AI」选项，跳过（不影响发布）')
-        return None
+        raise RuntimeError('头条作品声明中未找到「引用AI」选项')
 
     if result.get("checked"):
         if result.get("already"):
@@ -400,7 +417,7 @@ def attempt_ai_declaration(target_id):
         else:
             print('[INFO] AI创作声明: 已成功勾选「引用AI」')
     else:
-        print('[WARN] AI创作声明: 找到「引用AI」但勾选失败（不影响发布）')
+        raise RuntimeError('头条作品声明中「引用AI」勾选失败')
     return result
 
 

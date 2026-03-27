@@ -78,6 +78,14 @@ class EngineConfig:
         author = self._resolve("wechat_author", ("WECHAT_AUTHOR",), ("wechat", "author"))
         return app_id, secret, author
 
+    def get_wechat_settings(self) -> Dict[str, str]:
+        app_id, secret, author = self.resolve_wechat_credentials()
+        return {
+            "app_id": app_id or "",
+            "secret": secret or "",
+            "author": author or "",
+        }
+
     def resolve_themes_dir(self) -> Path:
         return self.base_dir / "themes"
 

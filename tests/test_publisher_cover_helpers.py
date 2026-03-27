@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import jianshu_publisher
+import toutiao_publisher
 import yidian_publisher
 import zhihu_publisher
 
@@ -93,6 +94,102 @@ class YidianCoverArgTests(unittest.TestCase):
             yidian_publisher.main()
 
         apply_cover_mock.assert_called_once_with("target-1", "/tmp/cover.png")
+
+
+class ZhihuDeclarationTests(unittest.TestCase):
+    def test_declare_ai_creation_targets_exact_label(self):
+        with patch.object(zhihu_publisher, "wait_until", side_effect=[True, True]), patch.object(
+            zhihu_publisher,
+            "run_cdp",
+            side_effect=[
+                '{"ok": true, "text": "未声明"}',
+                "clicked",
+                "clicked",
+                "内容包含AI辅助创作",
+            ],
+        ) as run_cdp_mock, patch.object(zhihu_publisher.time, "sleep", return_value=None):
+            zhihu_publisher.declare_ai_creation("zhihu-target")
+
+        expressions = [call.args[2] for call in run_cdp_mock.call_args_list if call.args[0] == "eval"]
+        self.assertTrue(any("内容包含AI辅助创作" in expression for expression in expressions))
+
+
+class ToutiaoStrictSettingTests(unittest.TestCase):
+    def test_apply_cover_raises_when_upload_verification_times_out(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"x")
+            cover_path = handle.name
+        try:
+            with patch.object(toutiao_publisher, "choose_cover_mode", return_value="checked"), patch.object(
+                toutiao_publisher,
+                "cover_mode_is_selected",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "wait_until",
+                return_value=False,
+            ), patch.object(
+                toutiao_publisher,
+                "run_cdp",
+                return_value="ok",
+            ):
+                with self.assertRaises(RuntimeError):
+                    toutiao_publisher.apply_cover("toutiao-target", cover_path)
+        finally:
+            Path(cover_path).unlink(missing_ok=True)
+
+    def test_attempt_ai_declaration_raises_when_option_missing(self):
+        with patch.object(
+            toutiao_publisher,
+            "run_cdp",
+            side_effect=[
+                "already-open",
+                '{"found": false}',
+            ],
+        ):
+            with self.assertRaises(RuntimeError):
+                toutiao_publisher.attempt_ai_declaration("toutiao-target")
+
+
+class YidianStrictSettingTests(unittest.TestCase):
+    def test_apply_cover_raises_when_single_cover_mode_not_confirmed(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"x")
+            cover_path = handle.name
+        try:
+            with patch.object(
+                yidian_publisher,
+                "wait_until",
+                return_value=False,
+            ), patch.object(
+                yidian_publisher,
+                "run_cdp",
+                return_value="ok",
+            ):
+                with self.assertRaises(RuntimeError):
+                    yidian_publisher.apply_cover("yidian-target", cover_path)
+        finally:
+            Path(cover_path).unlink(missing_ok=True)
+
+    def test_attempt_ai_declaration_targets_exact_label(self):
+        with patch.object(
+            yidian_publisher,
+            "run_cdp",
+            return_value='{"found": true, "checked": true}',
+        ) as run_cdp_mock:
+            yidian_publisher.attempt_ai_declaration("yidian-target")
+
+        expression = run_cdp_mock.call_args.args[2]
+        self.assertIn("内容由AI生成", expression)
+
+    def test_attempt_ai_declaration_raises_when_target_missing(self):
+        with patch.object(
+            yidian_publisher,
+            "run_cdp",
+            return_value='{"found": false}',
+        ):
+            with self.assertRaises(RuntimeError):
+                yidian_publisher.attempt_ai_declaration("yidian-target")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 ZHIHU_MATCHES = ("zhuanlan.zhihu.com", "www.zhihu.com/write", "www.zhihu.com/creator")
 ZHIHU_EDITOR_URL = "https://zhuanlan.zhihu.com/write"
 ZHIHU_COVER_FILE_INPUT = "input.UploadPicture-input"
+ZHIHU_AI_DECLARATION = "内容包含AI辅助创作"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 
 
@@ -34,6 +35,10 @@ def run_cdp(command, *args, timeout=120):
         return result.stdout.strip()
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"CDP call timed out after {timeout}s: {command} {args}") from exc
+
+
+def normalize_ui_text(text):
+    return "".join((text or "").split())
 
 
 def find_zhihu_target():
@@ -317,7 +322,7 @@ def declare_ai_creation(target_id):
     if not info.get("ok"):
         raise RuntimeError(f"未找到「创作声明」下拉框: {info.get('reason')}")
 
-    if "AI 辅助创作" in info.get("text", ""):
+    if normalize_ui_text(info.get("text", "")) == normalize_ui_text(ZHIHU_AI_DECLARATION):
         print(f"[INFO] AI创作声明已选中: {info['text']}")
         return
 
@@ -343,26 +348,28 @@ def declare_ai_creation(target_id):
         target_id,
         """(() => {
   const opts = Array.from(document.querySelectorAll('[role=option]'));
-  return opts.some(o => (o.innerText || '').includes('AI 辅助创作'));
+  const normalize = (text) => (text || '').replace(/\s+/g, '');
+  return opts.some(o => normalize(o.innerText || '') === normalize('内容包含AI辅助创作'));
 })()""",
         timeout_seconds=8,
     ):
-        raise RuntimeError("点击下拉框后未出现「AI 辅助创作」选项")
+        raise RuntimeError(f"点击下拉框后未出现「{ZHIHU_AI_DECLARATION}」选项")
 
-    print("[INFO] 选择「包含 AI 辅助创作」…")
+    print(f"[INFO] 选择「{ZHIHU_AI_DECLARATION}」…")
     select_result = run_cdp(
         "eval",
         target_id,
         """(() => {
+  const normalize = (text) => (text || '').replace(/\s+/g, '');
   const opt = Array.from(document.querySelectorAll('[role=option]'))
-    .find(o => (o.innerText || '').includes('AI 辅助创作'));
+    .find(o => normalize(o.innerText || '') === normalize('内容包含AI辅助创作'));
   if (!opt) return 'not-found';
   opt.click();
   return 'clicked';
 })()""",
     )
     if select_result != "clicked":
-        raise RuntimeError("未能点击「包含 AI 辅助创作」选项")
+        raise RuntimeError(f"未能点击「{ZHIHU_AI_DECLARATION}」选项")
 
     time.sleep(0.5)
 
@@ -377,7 +384,7 @@ def declare_ai_creation(target_id):
   return combo ? (combo.innerText || '').trim() : '';
 })()""",
     )
-    if "AI 辅助创作" not in verify_output:
+    if normalize_ui_text(verify_output) != normalize_ui_text(ZHIHU_AI_DECLARATION):
         raise RuntimeError(f"选择后验证失败，下拉框当前值: {verify_output}")
 
     print(f"[INFO] 已设置AI创作声明: {verify_output}")
