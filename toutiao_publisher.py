@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 TOUTIAO_MATCH = "mp.toutiao.com"
 TOUTIAO_EDITOR_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
+TOUTIAO_COVER_FILE_INPUT = "#upload-drag-input"
 AI_CHECKBOX_LABEL = "引用AI"
 
 
@@ -218,6 +219,20 @@ def choose_cover_mode(target_id, label_text="无封面", attempts=3):
     return "click-no-effect"
 
 
+def apply_cover(target_id, cover_path):
+    """切换为「单图」后点击添加封面，再向头条 file input 注入本地文件。"""
+    path = Path(cover_path).expanduser().resolve()
+    if not path.is_file():
+        raise RuntimeError(f"封面文件不存在: {path}")
+    cover_result = choose_cover_mode(target_id, label_text="单图", attempts=5)
+    if not cover_mode_is_selected(target_id, "单图"):
+        raise RuntimeError(f"头条封面未切换到单图: {cover_result}")
+    run_cdp("click", target_id, ".article-cover-add")
+    time.sleep(0.7)
+    run_cdp("setfile", target_id, TOUTIAO_COVER_FILE_INPUT, str(path))
+    print(f"[INFO] 已向头条封面控件注入文件: {path}")
+
+
 def choose_required_radio(target_id, cell_title, option_text):
     cell_json = json.dumps(cell_title, ensure_ascii=False)
     option_json = json.dumps(option_text, ensure_ascii=False)
@@ -415,7 +430,31 @@ def main():
         default="draft",
         help="draft 等待自动存草稿；publish 直接发布",
     )
+    parser.add_argument(
+        "--theme",
+        default=None,
+        help="可选主题标识（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--cover",
+        default=None,
+        metavar="PATH",
+        help="可选封面图路径（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--template-mode",
+        dest="template_mode",
+        default=None,
+        help="可选模板模式（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--article-id",
+        dest="article_id",
+        default=None,
+        help="可选文章标识（编排层预留，当前发布流程可不使用）。",
+    )
     args = parser.parse_args()
+    _ = (args.theme, args.template_mode, args.article_id)
 
     title, _body, html_body, article_path = load_article(args.markdown_file)
     target_id = find_toutiao_target()
@@ -426,10 +465,13 @@ def main():
     inject_result = inject_article(target_id, title, html_body)
     print(f"[INFO] 已写入头条号编辑器: {inject_result}")
 
-    cover_result = choose_cover_mode(target_id, label_text="无封面")
-    if not cover_mode_is_selected(target_id, "无封面"):
-        raise RuntimeError(f"头条封面未切换到无封面: {cover_result}")
-    print(f"[INFO] 已切换头条封面为无封面: {cover_result}")
+    if args.cover:
+        apply_cover(target_id, args.cover)
+    else:
+        cover_result = choose_cover_mode(target_id, label_text="无封面")
+        if not cover_mode_is_selected(target_id, "无封面"):
+            raise RuntimeError(f"头条封面未切换到无封面: {cover_result}")
+        print(f"[INFO] 已切换头条封面为无封面: {cover_result}")
 
     ad_result = choose_required_radio(target_id, "投放广告", "投放广告赚收益")
     if ad_result == "click-no-effect":

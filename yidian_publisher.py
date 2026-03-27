@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 YIDIAN_MATCH = "mp.yidianzixun.com"
 YIDIAN_EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
+YIDIAN_COVER_FILE_INPUT = ".upload-input"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 
 
@@ -216,6 +217,14 @@ def click_action(target_id, button_text):
     return run_cdp("eval", target_id, expression)
 
 
+def apply_cover(target_id, cover_path):
+    path = Path(cover_path).expanduser().resolve()
+    if not path.is_file():
+        raise RuntimeError(f"封面文件不存在: {path}")
+    run_cdp("setfile", target_id, YIDIAN_COVER_FILE_INPUT, str(path))
+    print(f"[INFO] 已向一点号封面上传控件注入文件: {path}")
+
+
 def select_default_cover(target_id):
     expression = """
 (() => {
@@ -355,7 +364,31 @@ def main():
         default="draft",
         help="draft 保存草稿，publish 直接发布",
     )
+    parser.add_argument(
+        "--theme",
+        default=None,
+        help="可选主题标识（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--cover",
+        default=None,
+        metavar="PATH",
+        help="可选封面图路径（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--template-mode",
+        dest="template_mode",
+        default=None,
+        help="可选模板模式（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--article-id",
+        dest="article_id",
+        default=None,
+        help="可选文章标识（编排层预留，当前发布流程可不使用）。",
+    )
     args = parser.parse_args()
+    _ = (args.theme, args.template_mode, args.article_id)
 
     title, _body, html, article_path = load_article(args.markdown_file)
     target_id = find_yidian_target()
@@ -368,6 +401,9 @@ def main():
 
     attempt_ai_declaration(target_id)
 
+    if args.cover:
+        apply_cover(target_id, args.cover)
+
     if args.mode == "draft":
         action = click_action(target_id, "存草稿")
         if action != "clicked":
@@ -375,10 +411,11 @@ def main():
         print(f"[OK] 已存草稿: {article_path}")
         return
 
-    cover_result = select_default_cover(target_id)
-    print(f"[INFO] 已尝试切换默认封面: {cover_result}")
-    if not wait_for_default_cover(target_id):
-        raise RuntimeError("默认封面未选中，无法继续发布")
+    if not args.cover:
+        cover_result = select_default_cover(target_id)
+        print(f"[INFO] 已尝试切换默认封面: {cover_result}")
+        if not wait_for_default_cover(target_id):
+            raise RuntimeError("默认封面未选中，无法继续发布")
 
     publish_ready = wait_for_button(target_id, "发布", timeout_seconds=10)
     if not publish_ready:

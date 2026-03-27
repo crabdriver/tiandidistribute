@@ -1,8 +1,12 @@
-# TiandiDistribute
+# ordo
 
-TiandiDistribute is a Markdown-first publishing toolkit for creators who want one clean workflow for multiple Chinese content platforms.
+`ordo` is a local multi-platform publishing engine for Chinese-language creators. It treats Markdown as the single source of truth, then prepares and distributes the same article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, and similar platforms with far less repeated login, formatting, and copy-paste work.
 
-Write once in Markdown, then preview, style, and distribute the same article to WeChat, Zhihu, Toutiao, Jianshu, and Yidian with a much smaller amount of manual copy-paste.
+The current release is still centered on a local CLI workflow, but the official direction is to turn the project into a GUI-ready local publishing core and eventually ship it as a native desktop application for `macOS` and `Windows`.
+
+The current automation boundary is explicit: `ordo` assumes the user already has valid platform login sessions, and the system handles article loading, content transformation, editor injection, draft or publish actions, result recording, and failure recovery. It does not promise automatic login, CAPTCHA handling, or anti-risk bypass behavior.
+
+Compatibility note: some internal paths and cache directories still use `.tiandidistribute/` for backward compatibility with the existing workflow and stored state, while the public project name is now `ordo`.
 
 [中文说明](README.md)
 
@@ -18,6 +22,7 @@ Write once in Markdown, then preview, style, and distribute the same article to 
 ## Included Tools
 
 - `publish.py`: unified multi-platform entry
+- `tiandi_engine/`: core local publishing engine package for tasks, config, state, results, adapters, and runner
 - `wechat_publisher.py`: WeChat-focused publishing flow
 - `zhihu_publisher.py`
 - `toutiao_publisher.py`
@@ -30,6 +35,16 @@ Write once in Markdown, then preview, style, and distribute the same article to 
 - `themes/`: theme library
 - `templates/`: preview templates
 - `live_cdp.mjs`: CDP browser bridge
+
+## Project Structure
+
+- `publish.py`: public CLI entry, now routed through the shared `tiandi_engine` runner
+- `tiandi_engine/`: engine core for task models, config, state recovery, platform adapters, and orchestration
+- `wechat_publisher.py`: compatibility CLI entry for the WeChat publishing flow
+- `scripts/`: standalone tools for formatting, WeChat draft publishing, image generation, and auxiliary workflows
+- `themes/`: WeChat theme library
+- `templates/`: local preview and gallery templates
+- `markdown_utils.py`: shared Markdown transformation utilities
 
 ## Install
 
@@ -139,6 +154,18 @@ The main entry tries to:
 - warm up the workbench tabs
 - reuse the same bound targets
 - run preflight checks before publishing
+- assign covers for **non-WeChat** browser platforms from a local cover pool (separate from WeChat’s `covers/cover_*.png` / AI cover behavior; see `tiandi_engine` config)
+
+### Structured results for GUI consumers
+
+After each platform step, the CLI prints one JSON line prefixed with `[META]`, containing: `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, and `error_type`. A future desktop GUI or automation can parse this without scraping unstructured logs.
+
+`publish_records.csv` includes the same columns. If you still have an older 8-column file, the first append under the new logic **migrates** the file to the wider schema (back up the CSV before upgrading).
+
+### Browser cover support (current behavior)
+
+- **Zhihu, Toutiao, Yidian**: publisher scripts accept a cover path from the engine and attempt custom cover upload (DOM-dependent; site changes may break it).
+- **Jianshu**: the editor is restrictive; when custom cover cannot be applied, the flow fails with an **explicit diagnostic**—do not read this as full Jianshu custom-cover support.
 
 ## Useful CDP Commands
 
@@ -147,6 +174,7 @@ node live_cdp.mjs list
 node live_cdp.mjs warmall
 node live_cdp.mjs eval <target> "document.title"
 node live_cdp.mjs pastehtml <target> "<p>Hello</p>"
+node live_cdp.mjs setfile <target> "<css-selector>" "/path/to/local/file"
 node live_cdp.mjs snap <target>
 node live_cdp.mjs stop
 ```

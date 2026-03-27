@@ -1,8 +1,12 @@
-# TiandiDistribute
+# ordo
 
-面向内容创作者的 Markdown 多平台发布工具。
+`ordo` 是一个面向中文内容创作者的本地多平台自动发布引擎。它以 Markdown 为单一内容源，负责把同一篇文章整理并分发到微信、知乎、头条号、简书、一点号等平台，目标是减少重复登录、重复排版和重复复制粘贴。
 
-你只需要专注写 Markdown，TiandiDistribute 负责把内容整理成适合微信、知乎、头条号、简书、一点号的发布形态，并尽量复用已经登录的浏览器工作台，减少重复登录、重复排版和重复复制粘贴。
+当前版本仍以本地 CLI 工作流为主，但项目的正式演进方向是整理成可被 GUI 直接调用的本地发布内核，并最终封装成可在 `macOS` 和 `Windows` 上一键安装的原生桌面软件。
+
+自动化边界目前定义为：默认依赖用户已经存在的登录态，系统负责文章装载、内容转换、平台注入、草稿或发布、结果记录和失败恢复；不承诺自动登录、验证码处理或风控绕过。
+
+兼容性说明：当前仓库中的部分内部路径与缓存目录仍沿用 `.tiandidistribute/` 命名，以兼容现有工作流和历史数据；对外项目名称统一为 `ordo`。
 
 [English](README_EN.md)
 
@@ -18,6 +22,7 @@
 ## 当前支持
 
 - `publish.py`: 多平台统一入口
+- `tiandi_engine/`: 本地发布引擎核心包，承载任务、配置、状态、结果、平台适配与 runner
 - `wechat_publisher.py`: 微信主发布链路
 - `zhihu_publisher.py`: 知乎发布
 - `toutiao_publisher.py`: 头条号发布
@@ -33,8 +38,9 @@
 
 ## 项目结构
 
-- `publish.py`: 统一发布入口，适合日常主流程
-- `wechat_publisher.py`: 微信专用发布器，支持 dry-run、主题、AI 封面、重复标题跳过
+- `publish.py`: 对外 CLI 入口，当前主流程已通过 `tiandi_engine` 统一调度
+- `tiandi_engine/`: 引擎内核，包含任务模型、配置模型、状态恢复、平台适配与统一 runner
+- `wechat_publisher.py`: 微信兼容入口，保留现有 CLI 使用方式
 - `scripts/`: 独立工具链
 - `themes/`: 微信样式主题
 - `templates/`: 本地预览与主题画廊模板
@@ -170,6 +176,18 @@ python3 reply_comments.py --dry-run
 - 自动预热工作台标签页
 - 复用固定 workbench
 - 在正式执行前做预检
+- 从本地封面池为**非微信平台**自动分配封面（与微信的 `covers/cover_*.png` / AI 封面策略相互独立，详见 `tiandi_engine` 配置）
+
+### 结构化结果与 GUI 消费
+
+每条平台执行结束后，除原有日志外会额外输出一行 `[META]` 前缀的 JSON，字段包括：`article_id`、`theme_name`、`template_mode`、`cover_path`、`platform`、`status`、`error_type`。后续桌面 GUI 或外部脚本可直接解析，无需再从散落的 stdout 推断状态。
+
+`publish_records.csv` 会写入与上述一致的列。若你仍在使用旧版仅有 8 列的 CSV，首次按新逻辑追加记录时会**自动迁移**为扩展表头（建议在版本升级后备份该文件）。
+
+### 浏览器侧封面能力（当前实现）
+
+- **知乎、头条号、一点号**：发布脚本支持通过引擎传入的封面路径设置自定义封面（依赖远程调试 Chrome 与页面 DOM；平台改版可能导致不稳定）。
+- **简书**：编辑器对封面上传限制较多，当前实现会在无法完成自定义封面时给出**明确诊断失败**，请勿理解为已全面支持简书自定义封面。
 
 ## 常用 CDP 命令
 
@@ -178,6 +196,7 @@ node live_cdp.mjs list
 node live_cdp.mjs warmall
 node live_cdp.mjs eval <target> "document.title"
 node live_cdp.mjs pastehtml <target> "<p>Hello</p>"
+node live_cdp.mjs setfile <target> "<css-selector>" "/path/to/local/file"
 node live_cdp.mjs snap <target>
 node live_cdp.mjs stop
 ```

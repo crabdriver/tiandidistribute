@@ -3,6 +3,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { spawn } from "child_process";
 import net from "net";
+import path from "path";
 import { resolveBrowserWsUrl } from "./live_cdp_ws_resolver.mjs";
 
 const TIMEOUT_MS = 15000;
@@ -394,6 +395,27 @@ async function pasteHtmlStr(cdp, sessionId, html) {
   return `Pasted HTML of length ${html.length}`;
 }
 
+async function setFileInputStr(cdp, sessionId, selector, filePath) {
+  if (!selector) {
+    throw new Error("setfile requires a CSS selector");
+  }
+  if (!filePath) {
+    throw new Error("setfile requires a file path");
+  }
+  const absolutePath = path.resolve(filePath);
+  if (!existsSync(absolutePath)) {
+    throw new Error(`File not found: ${absolutePath}`);
+  }
+  await cdp.send("DOM.enable", {}, sessionId);
+  const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
+  const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector }, sessionId);
+  if (!nodeId) {
+    throw new Error(`file input not found: ${selector}`);
+  }
+  await cdp.send("DOM.setFileInputFiles", { nodeId, files: [absolutePath] }, sessionId);
+  return `Set file on ${selector}`;
+}
+
 async function ensureTargetSession(state, targetId) {
   if (state.sessions.has(targetId)) {
     return state.sessions.get(targetId);
@@ -522,6 +544,8 @@ async function runBroker() {
               return { ok: true, result: await typeStr(cdp, sessionId, args[0]) };
             case "pastehtml":
               return { ok: true, result: await pasteHtmlStr(cdp, sessionId, args[0]) };
+            case "setfile":
+              return { ok: true, result: await setFileInputStr(cdp, sessionId, args[0], args[1]) };
             default:
               return { ok: false, error: `Unknown command: ${cmd}` };
           }
@@ -697,7 +721,7 @@ async function main() {
   const [, , command, ...args] = process.argv;
 
   if (!command) {
-    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|html|shot|snap|stop> ...");
+    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|setfile|html|shot|snap|stop> ...");
   }
 
   if (command === "_broker") {
@@ -762,16 +786,25 @@ async function main() {
   if (command === "pastehtml" && args.length < 2) {
     throw new Error("Usage: live_cdp.mjs pastehtml <target> <html>");
   }
+  if (command === "setfile" && args.length < 3) {
+    throw new Error("Usage: live_cdp.mjs setfile <target> <selector> <filePath>");
+  }
 
   if (
-    !["nav", "eval", "click", "clickxy", "type", "pastehtml", "html", "shot", "screenshot", "snap", "snapshot"].includes(command)
+    !["nav", "eval", "click", "clickxy", "type", "pastehtml", "setfile", "html", "shot", "screenshot", "snap", "snapshot"].includes(command)
   ) {
-    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|pastehtml|html|shot|snap|stop> ...");
+    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|pastehtml|setfile|html|shot|snap|stop> ...");
   }
 
   const targetId = await resolveFullTargetId(args[0]);
-  const commandArgs =
-    ["eval", "type", "pastehtml", "click", "html"].includes(command) ? [args.slice(1).join(" ")] : args.slice(1);
+  let commandArgs;
+  if (["eval", "type", "pastehtml", "click", "html"].includes(command)) {
+    commandArgs = [args.slice(1).join(" ")];
+  } else if (command === "setfile") {
+    commandArgs = [args[1], args.slice(2).join(" ")];
+  } else {
+    commandArgs = args.slice(1);
+  }
   const result = await sendBrokerCommand({ cmd: command, targetId, args: commandArgs });
   if (result) {
     console.log(result);

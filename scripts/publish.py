@@ -30,6 +30,8 @@ import requests
 # ── 路径 ──────────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent
 SKILL_DIR = SCRIPT_DIR.parent
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
 
 
 def load_config():
@@ -299,6 +301,23 @@ def find_cover_image(article_dir, cover_arg=None):
                 return covers[0]
 
     return None
+
+
+from tiandi_engine.platforms.wechat.api import (  # noqa: E402
+    download_external_image as shared_download_external_image,
+    get_access_token as shared_get_access_token,
+    push_draft as shared_push_draft,
+    replace_all_images as shared_replace_all_images,
+    upload_content_image as shared_upload_content_image,
+    upload_thumb_image as shared_upload_thumb_image,
+)
+
+get_access_token = shared_get_access_token
+upload_thumb_image = shared_upload_thumb_image
+upload_content_image = shared_upload_content_image
+download_external_image = shared_download_external_image
+replace_all_images = shared_replace_all_images
+push_draft = shared_push_draft
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────

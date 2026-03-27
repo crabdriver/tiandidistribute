@@ -131,6 +131,72 @@ class PublishConsoleStateTests(unittest.TestCase):
         self.assertIn("invalid appid", detail)
         self.assertIn("urllib warning", detail)
 
+    def test_record_platform_result_marks_skipped_existing_as_skipped(self):
+        session = build_session(
+            article_paths=["/tmp/a.md"],
+            platforms=["wechat"],
+            mode="draft",
+            available_themes=["chinese"],
+            default_theme="chinese",
+        )
+
+        record_platform_result(
+            session,
+            0,
+            {
+                "platform": "wechat",
+                "status": "skipped_existing",
+                "stdout": "已存在同标题文章",
+                "stderr": "",
+            },
+        )
+
+        detail = session["items"][0]["platforms"]["wechat"]
+        self.assertEqual(detail["status"], "skipped")
+        self.assertIn("已存在同标题文章", detail["detail"])
+
+    def test_finalize_article_treats_skipped_platform_as_success(self):
+        session = build_session(
+            article_paths=["/tmp/a.md"],
+            platforms=["wechat", "zhihu"],
+            mode="publish",
+            available_themes=["chinese"],
+            default_theme="chinese",
+        )
+
+        mark_publishing(session, 0)
+        record_platform_result(session, 0, {"platform": "wechat", "status": "skipped_existing", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "zhihu", "status": "published", "stdout": "", "stderr": ""})
+
+        article_status = finalize_article(session, 0)
+
+        self.assertEqual(article_status, "success")
+        self.assertEqual(session["summary"]["success_articles"], 1)
+        self.assertEqual(session["summary"]["platform_failures"]["wechat"], 0)
+
+    def test_finalize_article_counts_limit_reached_as_failure(self):
+        session = build_session(
+            article_paths=["/tmp/a.md", "/tmp/b.md"],
+            platforms=["wechat", "zhihu"],
+            mode="publish",
+            available_themes=["chinese"],
+            default_theme="chinese",
+        )
+
+        mark_publishing(session, 0)
+        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "zhihu", "status": "limit_reached", "stdout": "", "stderr": "今天已达上限"})
+        finalize_article(session, 0)
+
+        mark_publishing(session, 1)
+        record_platform_result(session, 1, {"platform": "wechat", "status": "failed", "stdout": "", "stderr": "x"})
+        record_platform_result(session, 1, {"platform": "zhihu", "status": "failed", "stdout": "", "stderr": "y"})
+        finalize_article(session, 1)
+
+        self.assertEqual(session["summary"]["partial_failed_articles"], 1)
+        self.assertEqual(session["summary"]["failed_articles"], 1)
+        self.assertEqual(session["summary"]["platform_failures"]["zhihu"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

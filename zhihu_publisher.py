@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 ZHIHU_MATCHES = ("zhuanlan.zhihu.com", "www.zhihu.com/write", "www.zhihu.com/creator")
 ZHIHU_EDITOR_URL = "https://zhuanlan.zhihu.com/write"
+ZHIHU_COVER_FILE_INPUT = "input.UploadPicture-input"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 
 
@@ -79,6 +80,15 @@ def wait_until(target_id, expression, timeout_seconds=20, interval_seconds=1):
             return True
         time.sleep(interval_seconds)
     return False
+
+
+def apply_cover(target_id, cover_path, run_cdp_fn=None):
+    """通过 CDP 向知乎「添加文章封面」对应的 file input 注入本地文件。"""
+    runner = run_cdp_fn or run_cdp
+    path = Path(cover_path).expanduser().resolve()
+    if not path.is_file():
+        raise RuntimeError(f"封面文件不存在: {path}")
+    runner("setfile", target_id, ZHIHU_COVER_FILE_INPUT, str(path))
 
 
 def ensure_editor_ready(target_id):
@@ -404,7 +414,31 @@ def main():
         default="draft",
         help="draft 只写入并等待自动保存；publish 尝试直接发布",
     )
+    parser.add_argument(
+        "--theme",
+        default=None,
+        help="可选主题标识（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--cover",
+        default=None,
+        metavar="PATH",
+        help="可选封面图路径（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--template-mode",
+        dest="template_mode",
+        default=None,
+        help="可选模板模式（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--article-id",
+        dest="article_id",
+        default=None,
+        help="可选文章标识（编排层预留，当前发布流程可不使用）。",
+    )
     args = parser.parse_args()
+    _ = (args.theme, args.template_mode, args.article_id)
 
     title, plain_body, article_path = load_article(args.markdown_file)
     target_id = find_zhihu_target()
@@ -412,6 +446,9 @@ def main():
         raise RuntimeError("没有找到知乎标签页，请先在当前 Chrome 中打开并登录任意知乎页面")
 
     ensure_editor_ready(target_id)
+    if args.cover:
+        apply_cover(target_id, args.cover)
+        print(f"[INFO] 已注入知乎封面: {args.cover}")
     inject_result = inject_article(target_id, title, plain_body)
     print(f"[INFO] 已写入知乎编辑器: {inject_result}")
 

@@ -1,7 +1,4 @@
-from tiandi_engine.state.session import (
-    FAILURE_STATUSES,
-    SKIPPED_STATUSES,
-    SUCCESS_STATUSES,
+from .session import (
     advance_after_success,
     build_session,
     finalize_article,
@@ -12,9 +9,6 @@ from tiandi_engine.state.session import (
 )
 
 __all__ = [
-    "SUCCESS_STATUSES",
-    "SKIPPED_STATUSES",
-    "FAILURE_STATUSES",
     "advance_after_success",
     "build_session",
     "finalize_article",

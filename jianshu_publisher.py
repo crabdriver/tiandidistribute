@@ -374,7 +374,37 @@ def main():
         default="draft",
         help="draft 新建并等待自动保存；publish 直接发布",
     )
+    parser.add_argument(
+        "--theme",
+        default=None,
+        help="可选主题标识（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--cover",
+        default=None,
+        metavar="PATH",
+        help="可选封面图路径（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--template-mode",
+        dest="template_mode",
+        default=None,
+        help="可选模板模式（编排层预留，当前发布流程可不使用）。",
+    )
+    parser.add_argument(
+        "--article-id",
+        dest="article_id",
+        default=None,
+        help="可选文章标识（编排层预留，当前发布流程可不使用）。",
+    )
     args = parser.parse_args()
+    _ = (args.theme, args.template_mode, args.article_id)
+
+    if args.cover:
+        raise RuntimeError(
+            "简书写作页当前没有稳定可用的封面图上传入口，无法使用编排层传入的 --cover。"
+            "请从 `--platform` 中移除 jianshu，或取消为简书分配封面后再试。"
+        )
 
     title, _body, source_html, article_path = load_article(args.markdown_file)
     target_id = find_jianshu_target()

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from publish_console_state import (
     advance_after_success,
@@ -17,6 +20,12 @@ from publish_console_state import (
     save_session,
 )
 from scripts.format import build_gallery_bundle, render_publish_console_page
+from tiandi_engine.assignment.covers import COVER_PLATFORMS, CoverPoolError, assign_covers, list_cover_files
+from tiandi_engine.assignment.templates import assign_templates
+from tiandi_engine.config import load_engine_config
+from tiandi_engine.platforms.base import classify_process_result
+from tiandi_engine.platforms.registry import build_platform_registry
+from tiandi_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,6 +33,21 @@ CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
+PUBLISH_RECORD_FIELDNAMES = [
+    "timestamp",
+    "article",
+    "article_id",
+    "platform",
+    "mode",
+    "theme_name",
+    "template_mode",
+    "cover_path",
+    "status",
+    "error_type",
+    "returncode",
+    "stdout",
+    "stderr",
+]
 PUBLISH_CONSOLE_DIR = BASE_DIR / ".tiandidistribute" / "publish-console"
 PUBLISH_CONSOLE_HTML = PUBLISH_CONSOLE_DIR / "console.html"
 PUBLISH_CONSOLE_SESSION = PUBLISH_CONSOLE_DIR / "publish-console-session.json"
@@ -54,6 +78,7 @@ PLATFORM_MATCHES = {
 }
 DEFAULT_PLATFORMS = ["wechat", "zhihu", "toutiao", "jianshu", "yidian"]
 BROWSER_PLATFORMS = list(PLATFORM_URLS.keys())
+COVER_PLATFORMS_SET = frozenset(COVER_PLATFORMS)
 
 
 def parse_platforms(raw_value):
@@ -163,9 +188,99 @@ def get_page_text_snippet(target_id, limit=2000):
     return run_cdp("eval", target_id, expression)
 
 
-def run_preflight_checks(platforms, mode, workbench):
+def _safe_article_stem(path: Path) -> str:
+    stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in path.stem)
+    return stem[:80] or "article"
+
+
+def article_id_for_path(article_path: Path, index: int) -> str:
+    return f"{index:04d}-{_safe_article_stem(article_path)}"
+
+
+def discover_cover_pool_status(base_dir: Path, cover_dir_override: Optional[Path] = None):
+    """Return discover_cover_pool()-shaped dict; optional cover_dir for tests."""
+    if cover_dir_override is not None:
+        cover_dir = Path(cover_dir_override).expanduser().resolve()
+        try:
+            files = list_cover_files(cover_dir)
+        except CoverPoolError as exc:
+            return {
+                "ok": False,
+                "cover_dir": str(cover_dir),
+                "paths": [],
+                "count": 0,
+                "error": str(exc),
+            }
+        paths = [str(p) for p in files]
+        return {
+            "ok": True,
+            "cover_dir": str(cover_dir),
+            "paths": paths,
+            "count": len(paths),
+            "error": None,
+        }
+    return load_engine_config(base_dir).discover_cover_pool()
+
+
+def build_template_assignments_for_articles(base_dir: Path, article_ids: tuple[str, ...]):
+    ec = load_engine_config(base_dir)
+    themes_dir = ec.resolve_themes_dir()
+    if not themes_dir.is_dir() or not any(themes_dir.glob("*.json")):
+        return ()
+    return assign_templates(
+        article_ids,
+        themes_dir=themes_dir,
+        assignment_mode=ec.get_default_template_mode(),
+    )
+
+
+def build_cover_assignments_for_articles(base_dir: Path, article_ids: tuple[str, ...], platforms: list[str]):
+    ec = load_engine_config(base_dir)
+    pool = ec.discover_cover_pool()
+    if not pool["ok"]:
+        return ()
+    need = [p for p in platforms if p in COVER_PLATFORMS_SET]
+    if not need:
+        return ()
+    return assign_covers(
+        article_ids,
+        platforms,
+        cover_dir=ec.resolve_cover_dir(),
+        recent_cover_paths=(),
+        repeat_window=ec.get_cover_repeat_window(),
+    )
+
+
+def build_publish_context_resolver(article_paths: list[Path], platforms: list[str], template_assignments, cover_assignments):
+    path_to_id = {p.resolve(): article_id_for_path(p, i) for i, p in enumerate(article_paths)}
+    tmpl_by_id = {a.article_id: a for a in template_assignments} if template_assignments else {}
+    cover_by_pair = {}
+    for ca in cover_assignments or ():
+        cover_by_pair[(ca.article_id, ca.platform)] = ca.cover_path
+
+    def context_resolver(article_path, platform):
+        aid = path_to_id.get(Path(article_path).resolve())
+        if aid is None:
+            return None
+        blob = {"article_id": aid}
+        if platform != "wechat":
+            ta = tmpl_by_id.get(aid)
+            if ta:
+                blob["template_mode"] = ta.template_mode
+                blob["theme_name"] = ta.theme_id
+        cover_path = cover_by_pair.get((aid, platform))
+        if cover_path:
+            blob["cover_path"] = str(cover_path)
+        return blob
+
+    return context_resolver
+
+
+def run_preflight_checks(platforms, mode, workbench, base_dir=None, cover_dir_override=None):
     blockers = []
     warnings = []
+    root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
+    override = Path(cover_dir_override).resolve() if cover_dir_override is not None else None
 
     if "wechat" in platforms:
         wechat = get_wechat_config_status()
@@ -190,126 +305,90 @@ def run_preflight_checks(platforms, mode, workbench):
         if platform in BROWSER_PLATFORMS and not workbench.get(platform):
             blockers.append(f"未找到 `{platform}` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录")
 
+    non_wechat_cover_platforms = [p for p in platforms if p in COVER_PLATFORMS_SET]
+    if non_wechat_cover_platforms:
+        pool_info = discover_cover_pool_status(root, cover_dir_override=override)
+        if not pool_info["ok"]:
+            label = "、".join(non_wechat_cover_platforms)
+            detail = pool_info.get("error") or "封面池不可用"
+            msg = (
+                f"非微信平台自动分配封面需要可用本地封面池（目录: {pool_info.get('cover_dir', '')}）：{detail}。"
+                f"涉及平台: {label}"
+            )
+            if mode == "publish":
+                blockers.append(msg)
+            else:
+                warnings.append(msg)
+
     return blockers, warnings
 
 
 def run_platform(platform, markdown_file, mode, theme_name=None):
-    script_name = PLATFORM_SCRIPTS[platform]
-    script_path = BASE_DIR / script_name
-    command = [sys.executable, str(script_path), markdown_file, "--mode", mode]
-    if platform == "wechat" and theme_name:
-        command.extend(["--theme", theme_name])
-        
-    env = os.environ.copy()
-    bound_targets = load_workbench_targets()
-    target = bound_targets.get(platform)
-    if target:
-        env[f"PUBLISH_TARGET_{platform.upper()}"] = target
-
-    result = subprocess.run(
-        command,
-        cwd=str(BASE_DIR),
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=180,
+    registry = build_platform_registry(BASE_DIR)
+    result = run_platform_task(
+        base_dir=BASE_DIR,
+        platform=platform,
+        markdown_file=markdown_file,
+        mode=mode,
+        theme_name=theme_name,
+        registry=registry,
     )
-    return {
-        "platform": platform,
-        "script": script_name,
-        "command": " ".join(command),
-        "returncode": result.returncode,
-        "stdout": result.stdout.strip(),
-        "stderr": result.stderr.strip(),
-    }
+    result["script"] = PLATFORM_SCRIPTS[platform]
+    return result
 
 
 def classify_result(result):
-    output = "\n".join(filter(None, [result.get("stdout", ""), result.get("stderr", "")]))
-    platform = result["platform"]
-    mode = result.get("mode")
-    limit_markers = [
-        "达到发布上限",
-        "发布上限",
-        "次数上限",
-        "每天最多",
-        "请明天再来",
-        "未来7天",
-        "审核通过前你将无法继续编辑",
-        "暂不发布",
-        "时间限制",
-        "排期",
-    ]
+    return classify_process_result(result["platform"], result.get("mode"), result)
 
-    if any(marker in output for marker in limit_markers):
-        return "limit_reached"
 
-    if result["returncode"] != 0:
-        if "草稿" in output:
-            return "draft_only"
-        return "failed"
-
-    if platform == "wechat":
-        if "已存在同标题文章" in output:
-            return "skipped_existing"
-        if "已发布到微信公众号" in output:
-            return "published"
-        if "已写入微信公众号草稿" in output:
-            return "draft_only"
-        return "success_unknown"
-
-    if mode == "publish":
-        publish_markers = {
-            "zhihu": "已发布到知乎",
-            "toutiao": "已发布到头条号",
-            "jianshu": "已发布到简书",
-            "yidian": "已发布成功",
-        }
-        if publish_markers.get(platform) and publish_markers[platform] in output:
-            return "published"
-        return "failed"
-
-    draft_markers = {
-        "zhihu": "已写入知乎草稿页",
-        "toutiao": "已写入头条草稿页",
-        "jianshu": "已生成简书草稿",
-        "yidian": "已存草稿",
-    }
-    if draft_markers.get(platform) and draft_markers[platform] in output:
-        return "draft_only"
-    return "success_unknown"
+def _maybe_migrate_publish_records_csv(path: Path):
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("r", encoding="utf-8", newline="") as fp:
+        reader = csv.DictReader(fp)
+        old_fn = list(reader.fieldnames or [])
+        rows = list(reader)
+    if set(old_fn) == set(PUBLISH_RECORD_FIELDNAMES):
+        return
+    with path.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES})
 
 
 def append_publish_record(result):
-    file_exists = PUBLISH_RECORDS_FILE.exists()
-    with PUBLISH_RECORDS_FILE.open("a", encoding="utf-8", newline="") as fp:
-        writer = csv.DictWriter(
-            fp,
-            fieldnames=[
-                "timestamp",
-                "article",
-                "platform",
-                "mode",
-                "status",
-                "returncode",
-                "stdout",
-                "stderr",
-            ],
-        )
-        if not file_exists:
+    path = PUBLISH_RECORDS_FILE
+    _maybe_migrate_publish_records_csv(path)
+    had_rows = path.exists() and path.stat().st_size > 0
+    et = result.get("error_type")
+    error_type_cell = et if et is not None and et != "" else ""
+
+    def _cell(val):
+        if val is None:
+            return ""
+        return str(val)
+
+    row = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "article": result.get("article", ""),
+        "article_id": _cell(result.get("article_id")),
+        "platform": result["platform"],
+        "mode": result.get("mode", ""),
+        "theme_name": _cell(result.get("theme_name")),
+        "template_mode": _cell(result.get("template_mode")),
+        "cover_path": _cell(result.get("cover_path")),
+        "status": result.get("status", ""),
+        "error_type": error_type_cell,
+        "returncode": result["returncode"],
+        "stdout": result.get("stdout", "").replace("\n", "\\n"),
+        "stderr": result.get("stderr", "").replace("\n", "\\n"),
+    }
+    with path.open("a", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES, extrasaction="ignore")
+        if not had_rows:
             writer.writeheader()
-        writer.writerow(
-            {
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "article": result.get("article", ""),
-                "platform": result["platform"],
-                "mode": result.get("mode", ""),
-                "status": result.get("status", ""),
-                "returncode": result["returncode"],
-                "stdout": result.get("stdout", "").replace("\n", "\\n"),
-                "stderr": result.get("stderr", "").replace("\n", "\\n"),
-            }
-        )
+        writer.writerow(row)
 
 
 def print_result(result):
@@ -320,6 +399,16 @@ def print_result(result):
     if result["stderr"]:
         print(result["stderr"])
     print(f"[EXIT] {result['returncode']}")
+    meta = {
+        "article_id": result.get("article_id"),
+        "theme_name": result.get("theme_name"),
+        "template_mode": result.get("template_mode"),
+        "cover_path": result.get("cover_path"),
+        "platform": result["platform"],
+        "status": result.get("status"),
+        "error_type": result.get("error_type"),
+    }
+    print(f"[META] {json.dumps(meta, ensure_ascii=False)}")
 
 
 def run_cdp(*args):
@@ -905,30 +994,37 @@ def main():
             raise SystemExit(1)
         return
 
-    for index, article_path in enumerate(article_paths, start=1):
-        print(f"===== article {index}/{len(article_paths)} =====")
-        print(article_path)
+    registry = build_platform_registry(BASE_DIR)
+    theme_resolver = None
+    if "wechat" in platforms:
+        theme_resolver = lambda article_path: resolve_wechat_theme_for_article(  # noqa: E731
+            article_path,
+            theme_mode,
+            available_themes,
+            args.wechat_theme,
+        )
 
-        for platform in platforms:
-            theme_name = None
-            if platform == "wechat":
-                theme_name = resolve_wechat_theme_for_article(
-                    article_path,
-                    theme_mode,
-                    available_themes,
-                    args.wechat_theme,
-                )
+    article_ids = tuple(article_id_for_path(p, i) for i, p in enumerate(article_paths))
+    template_assignments = build_template_assignments_for_articles(BASE_DIR, article_ids)
+    cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+    context_resolver = build_publish_context_resolver(
+        article_paths,
+        platforms,
+        template_assignments,
+        cover_assignments,
+    )
 
-            result = run_platform(platform, str(article_path), args.mode, theme_name=theme_name)
-            result["article"] = str(article_path)
-            result["mode"] = args.mode
-            result["status"] = classify_result(result)
-            results.append(result)
-            append_publish_record(result)
-            print_result(result)
-
-            if result["returncode"] != 0 and not args.continue_on_error:
-                raise SystemExit(result["returncode"])
+    results, exit_code = run_publish_pipeline(
+        base_dir=BASE_DIR,
+        args=args,
+        article_paths=article_paths,
+        platforms=platforms,
+        registry=registry,
+        theme_resolver=theme_resolver,
+        context_resolver=context_resolver,
+        append_record=append_publish_record,
+        printer=print_result,
+    )
 
     failed = [item for item in results if item["returncode"] != 0]
     succeeded = [item for item in results if item["returncode"] == 0]
@@ -937,7 +1033,7 @@ def main():
     print(f"成功: {len(succeeded)}")
     print(f"失败: {len(failed)}")
 
-    if failed:
+    if failed or exit_code:
         raise SystemExit(1)
 
 

@@ -794,7 +794,7 @@ def main():
         args = parser.parse_args()
 
         print("=" * 50)
-        print("  微信公众号自动发布引擎 v3.0")
+        print("  ordo 微信公众号自动发布引擎 v3.0")
         print(f"  作者/公众号: {os.getenv('WECHAT_AUTHOR', '配置的作者')}")
         print("=" * 50)
 
