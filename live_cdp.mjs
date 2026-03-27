@@ -3,8 +3,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { spawn } from "child_process";
 import net from "net";
-import { homedir } from "os";
-import { resolve } from "path";
+import { resolveBrowserWsUrl } from "./live_cdp_ws_resolver.mjs";
 
 const TIMEOUT_MS = 15000;
 const NAVIGATION_TIMEOUT_MS = 30000;
@@ -15,23 +14,6 @@ const BROKER_CONNECT_DELAY_MS = 500;
 const PAGES_CACHE = "/tmp/live-cdp-pages.json";
 
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
-
-function getBrowserWsUrl() {
-  const candidates = [
-    resolve(homedir(), "Library/Application Support/Google/Chrome/DevToolsActivePort"),
-    resolve(homedir(), ".config/google-chrome/DevToolsActivePort"),
-  ];
-
-  const portFile = candidates.find((path) => existsSync(path));
-  if (!portFile) {
-    throw new Error(
-      "Could not find DevToolsActivePort. Enable Chrome remote debugging in chrome://inspect/#remote-debugging"
-    );
-  }
-
-  const [port, browserPath] = readFileSync(portFile, "utf8").trim().split("\n");
-  return `ws://127.0.0.1:${port}${browserPath}`;
-}
 
 class CDP {
   #ws;
@@ -447,7 +429,7 @@ function removeSession(state, { sessionId = null, targetId = null } = {}) {
 
 async function runBroker() {
   const cdp = new CDP();
-  await cdp.connect(getBrowserWsUrl());
+  await cdp.connect(await resolveBrowserWsUrl());
 
   const state = {
     cdp,

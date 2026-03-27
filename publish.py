@@ -8,12 +8,25 @@ import sys
 import time
 from pathlib import Path
 
+from publish_console_state import (
+    advance_after_success,
+    build_session,
+    finalize_article,
+    mark_publishing,
+    record_platform_result,
+    save_session,
+)
+from scripts.format import build_gallery_bundle, render_publish_console_page
+
 
 BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
+PUBLISH_CONSOLE_DIR = BASE_DIR / ".tiandidistribute" / "publish-console"
+PUBLISH_CONSOLE_HTML = PUBLISH_CONSOLE_DIR / "console.html"
+PUBLISH_CONSOLE_SESSION = PUBLISH_CONSOLE_DIR / "publish-console-session.json"
 CHROME_APP_CANDIDATES = [
     "Google Chrome",
     "Google Chrome Beta",
@@ -486,6 +499,8 @@ def warm_platforms(platforms):
 
 
 def resolve_wechat_theme_mode(args, available_themes):
+    if args.wechat_theme_mode == "console":
+        return "console"
     if args.wechat_theme_mode == "random":
         return "random"
     if args.wechat_theme_mode == "fixed":
@@ -508,6 +523,238 @@ def resolve_wechat_theme_for_article(article_path, theme_mode, available_themes,
         ).strip()
         return ans if ans else fixed_theme
     return fixed_theme
+
+
+def _safe_console_name(article_path, index):
+    stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in article_path.stem)
+    return f"{index + 1:03d}-{stem[:60] or 'article'}"
+
+
+def _file_url(path):
+    return path.resolve().as_uri() + f"?ts={int(time.time() * 1000)}"
+
+
+def find_console_target(tabs):
+    console_url = PUBLISH_CONSOLE_HTML.resolve().as_uri().split("?", 1)[0]
+    return next((tab["target"] for tab in tabs if tab["url"].split("?", 1)[0] == console_url), None)
+
+
+def ensure_console_target(auto_launch=True):
+    tabs = list_tabs_or_none()
+    if tabs is None:
+        if not auto_launch:
+            raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开已启用远程调试的 Chrome")
+        tabs, launched_app = ensure_chrome_ready([])
+        if launched_app:
+            print(f"[INFO] 已自动启动浏览器: {launched_app}")
+    if tabs is None:
+        raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开已启用远程调试的 Chrome")
+
+    target = find_console_target(tabs)
+    console_url = _file_url(PUBLISH_CONSOLE_HTML)
+    if target:
+        run_cdp("nav", target, console_url)
+        return target
+
+    if tabs:
+        fallback_target = tabs[0]["target"]
+        run_cdp("nav", fallback_target, console_url)
+        return fallback_target
+
+    if not auto_launch:
+        raise RuntimeError("未找到发布主控台标签页，且当前设置为 `--no-auto-launch`")
+
+    launch_chrome([console_url])
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        tabs = list_tabs_or_none() or []
+        target = find_console_target(tabs)
+        if target:
+            return target
+        time.sleep(0.5)
+    raise RuntimeError("发布主控台页面未能打开，请确认 Chrome 远程调试已开启")
+
+
+def wait_for_console_ready(target_id, timeout_seconds=15):
+    deadline = time.time() + timeout_seconds
+    expression = (
+        "(() => document.readyState === 'complete' && "
+        "!!(window.publishConsole && window.publishConsole.setState))()"
+    )
+    while time.time() < deadline:
+        try:
+            result = run_cdp("eval", target_id, expression).strip().lower()
+        except subprocess.CalledProcessError:
+            result = ""
+        if result == "true":
+            return
+        time.sleep(0.5)
+    raise RuntimeError("发布主控台页面未就绪，请确认页面已成功打开")
+
+
+def sync_console_state(target_id, session):
+    payload = json.dumps(session, ensure_ascii=False)
+    expression = (
+        "(() => {"
+        f"const nextState = {payload};"
+        "if (window.publishConsole && window.publishConsole.setState) {"
+        "  return window.publishConsole.setState(nextState);"
+        "}"
+        "window.__PUBLISH_CONSOLE_STATE__ = nextState;"
+        "return 'missing-controller';"
+        "})()"
+    )
+    return run_cdp("eval", target_id, expression)
+
+
+def wait_for_console_confirmation(target_id, expected_index, timeout_seconds=None):
+    expression = (
+        "(() => (window.publishConsole && window.publishConsole.getAction "
+        "? window.publishConsole.getAction() "
+        ": (window.__PUBLISH_CONSOLE_ACTION__ || '')))()"
+    )
+    clear_expression = (
+        "(() => (window.publishConsole && window.publishConsole.clearAction "
+        "? window.publishConsole.clearAction() "
+        ": (window.__PUBLISH_CONSOLE_ACTION__ = '', 'ok')))()"
+    )
+    deadline = time.time() + timeout_seconds if timeout_seconds else None
+    while deadline is None or time.time() < deadline:
+        raw = run_cdp("eval", target_id, expression).strip()
+        if raw:
+            action = json.loads(raw)
+            if action.get("type") == "confirm" and action.get("article_index") == expected_index:
+                run_cdp("eval", target_id, clear_expression)
+                return action
+        time.sleep(0.5)
+    raise RuntimeError("等待主控台确认超时")
+
+
+def run_console_queue(args, platforms, article_paths, available_themes):
+    session = build_session(
+        article_paths=[str(path) for path in article_paths],
+        platforms=platforms,
+        mode=args.mode,
+        available_themes=available_themes,
+        default_theme=args.wechat_theme,
+    )
+    session["phase"] = "reviewing"
+    session["notice"] = {
+        "id": int(time.time() * 1000),
+        "level": "info",
+        "message": "请选择当前文章的微信模板，然后点击确认发布。",
+    }
+    save_session(PUBLISH_CONSOLE_SESSION, session)
+
+    console_target = None
+    results = []
+
+    for index, article_path in enumerate(article_paths):
+        item = session["items"][index]
+        render_dir = PUBLISH_CONSOLE_DIR / _safe_console_name(article_path, index)
+        bundle = build_gallery_bundle(
+            input_path=article_path,
+            vault_root=article_path.parent,
+            output_dir=render_dir,
+            theme_ids=available_themes,
+        )
+        item["title"] = bundle["title"]
+        item["word_count"] = bundle["word_count"]
+        session["current_index"] = index
+        session["current_theme"] = item.get("selected_theme") or session["current_theme"]
+        session["phase"] = "reviewing"
+        session["notice"] = {
+            "id": int(time.time() * 1000),
+            "level": "info",
+            "message": f"正在预览《{bundle['title']}》，请先确认微信模板。",
+        }
+        save_session(PUBLISH_CONSOLE_SESSION, session)
+        render_publish_console_page(bundle, session, PUBLISH_CONSOLE_HTML)
+
+        console_target = ensure_console_target(auto_launch=not args.no_auto_launch)
+        wait_for_console_ready(console_target)
+        sync_console_state(console_target, session)
+
+        action = wait_for_console_confirmation(console_target, index)
+        chosen_theme = action.get("theme") or args.wechat_theme
+        item["selected_theme"] = chosen_theme
+        session["current_theme"] = chosen_theme
+        session["phase"] = "publishing"
+        session["notice"] = {
+            "id": int(time.time() * 1000),
+            "level": "info",
+            "message": f"已确认模板 {chosen_theme}，开始执行全平台发布。",
+        }
+        save_session(PUBLISH_CONSOLE_SESSION, session)
+        sync_console_state(console_target, session)
+
+        mark_publishing(session, index)
+        save_session(PUBLISH_CONSOLE_SESSION, session)
+        sync_console_state(console_target, session)
+
+        print(f"===== article {index + 1}/{len(article_paths)} =====")
+        print(article_path)
+        print(f"[INFO] 主控台已确认微信模板: {chosen_theme}")
+
+        for platform in platforms:
+            theme_name = chosen_theme if platform == "wechat" else None
+            result = run_platform(platform, str(article_path), args.mode, theme_name=theme_name)
+            result["article"] = str(article_path)
+            result["mode"] = args.mode
+            result["status"] = classify_result(result)
+            results.append(result)
+            append_publish_record(result)
+            print_result(result)
+
+            record_platform_result(session, index, result)
+            save_session(PUBLISH_CONSOLE_SESSION, session)
+            sync_console_state(console_target, session)
+
+        article_status = finalize_article(session, index)
+        if article_status == "success":
+            notice_level = "success"
+            notice_message = f"《{item['title']}》已完成发布，准备进入下一篇。"
+        elif article_status == "partial_failed":
+            notice_level = "warn"
+            notice_message = f"《{item['title']}》部分平台失败，已记录后继续下一篇。"
+        else:
+            notice_level = "warn"
+            notice_message = f"《{item['title']}》全部平台发布失败，主控台已暂停。"
+
+        session["phase"] = "reviewing"
+        session["notice"] = {
+            "id": int(time.time() * 1000),
+            "level": notice_level,
+            "message": notice_message,
+        }
+        save_session(PUBLISH_CONSOLE_SESSION, session)
+        sync_console_state(console_target, session)
+
+        if article_status == "failed":
+            break
+
+        if advance_after_success(session, index):
+            save_session(PUBLISH_CONSOLE_SESSION, session)
+            time.sleep(1.2)
+            continue
+
+    if session["items"]:
+        final_item = session["items"][session["current_index"]]
+        if final_item["status"] in {"success", "partial_failed"} and session["summary"]["completed_articles"] == len(session["items"]):
+            session["phase"] = "complete"
+            session["notice"] = {
+                "id": int(time.time() * 1000),
+                "level": "success",
+                "message": (
+                    f"全部文章处理完成：成功 {session['summary']['success_articles']} 篇，"
+                    f"部分失败 {session['summary']['partial_failed_articles']} 篇，"
+                    f"失败 {session['summary']['failed_articles']} 篇。"
+                ),
+            }
+            save_session(PUBLISH_CONSOLE_SESSION, session)
+            sync_console_state(console_target, session)
+
+    return results
 
 
 def main():
@@ -567,9 +814,9 @@ def main():
     )
     parser.add_argument(
         "--wechat-theme-mode",
-        choices=["auto", "prompt", "random", "fixed"],
+        choices=["auto", "prompt", "random", "fixed", "console"],
         default="auto",
-        help="微信主题分配方式：auto 自动判断；prompt 每篇手动输入；random 随机；fixed 固定使用 --wechat-theme",
+        help="微信主题分配方式：auto 自动判断；prompt 每篇手动输入；random 随机；fixed 固定使用 --wechat-theme；console 浏览器逐篇预览确认",
     )
     args = parser.parse_args()
 
@@ -630,6 +877,8 @@ def main():
             available_themes = sorted(f.stem for f in theme_dir.glob("*.json"))
 
         theme_mode = resolve_wechat_theme_mode(args, available_themes)
+        if theme_mode == "console" and "wechat" not in platforms:
+            raise RuntimeError("`--wechat-theme-mode console` 需要包含 wechat 平台")
         if theme_mode == "prompt":
             while True:
                 ans = input(
@@ -644,6 +893,17 @@ def main():
                 if ans == "3":
                     theme_mode = "fixed"
                     break
+
+    if theme_mode == "console":
+        results = run_console_queue(args, platforms, article_paths, available_themes)
+        failed = [item for item in results if item["returncode"] != 0]
+        succeeded = [item for item in results if item["returncode"] == 0]
+        print("===== summary =====")
+        print(f"成功: {len(succeeded)}")
+        print(f"失败: {len(failed)}")
+        if failed:
+            raise SystemExit(1)
+        return
 
     for index, article_path in enumerate(article_paths, start=1):
         print(f"===== article {index}/{len(article_paths)} =====")

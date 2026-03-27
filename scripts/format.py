@@ -301,7 +301,8 @@ def convert_wikilinks(text: str, vault_root: Path, output_dir: Path) -> str:
     if config_path.exists():
         import json as _json
         try:
-            _cfg = _json.load(open(config_path, encoding="utf-8"))
+            with open(config_path, encoding="utf-8") as config_file:
+                _cfg = _json.load(config_file)
             for p in _cfg.get("image_search_paths", []):
                 search_roots.append(Path(p).expanduser())
         except Exception:
@@ -1502,28 +1503,67 @@ def _render_single_theme(tid, theme_data, gallery_html, gallery_footnote):
     return tid, rendered
 
 
-def generate_gallery(rendered_map: dict, theme_map: dict,
-                     theme_ids: list, title: str, word_count: int,
-                     output_dir: Path, recommended: list = None):
-    """生成主题画廊页面（单预览区 + 切换按钮模式）"""
+def load_gallery_themes(theme_ids=None):
+    requested_ids = list(theme_ids or GALLERY_THEMES)
+    theme_map = {}
+    ordered_ids = []
+    for tid in requested_ids:
+        theme_path = THEMES_DIR / f"{tid}.json"
+        if not theme_path.exists():
+            continue
+        with open(theme_path, encoding="utf-8") as f:
+            theme_map[tid] = json.load(f)
+        ordered_ids.append(tid)
+    if not ordered_ids:
+        raise ValueError("没有找到任何可用的画廊主题")
+    return ordered_ids, theme_map
+
+
+def render_gallery_themes(gallery_html: str, gallery_footnote: str, theme_ids=None):
+    ordered_ids, theme_map = load_gallery_themes(theme_ids)
+    rendered_map = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(ordered_ids))) as executor:
+        futures = {
+            executor.submit(_render_single_theme, tid, theme_map[tid], gallery_html, gallery_footnote): tid
+            for tid in ordered_ids
+        }
+        for future in as_completed(futures):
+            tid, rendered = future.result()
+            rendered_map[tid] = rendered
+    return ordered_ids, theme_map, rendered_map
+
+
+def build_gallery_bundle(input_path: Path, vault_root: Path, output_dir: Path, theme_ids=None):
+    content = input_path.read_text(encoding="utf-8")
+    result = format_for_output(content, input_path, {}, output_dir, vault_root, output_format="html")
+    ordered_ids, theme_map, rendered_map = render_gallery_themes(
+        result["html"],
+        result["footnote_html"],
+        theme_ids=theme_ids,
+    )
+    return {
+        "title": result["title"],
+        "word_count": result["word_count"],
+        "theme_ids": ordered_ids,
+        "theme_map": theme_map,
+        "rendered_map": rendered_map,
+    }
+
+
+def _build_theme_buttons_and_previews(theme_map: dict, theme_ids: list, rendered_map: dict, recommended=None):
     if recommended is None:
         recommended = []
-    template_path = TEMPLATE_DIR / "gallery.html"
-    template = template_path.read_text(encoding="utf-8")
-
-    default_theme = theme_ids[0] if theme_ids else ""
-
-    # 生成 THEME_BUTTONS（带分组标签）
-    GROUPS = [
+    groups = [
         ("深度长文", ["newspaper", "magazine", "ink", "coffee-house"]),
         ("科技产品", ["bytedance", "github", "sspai", "midnight"]),
         ("文艺随笔", ["terracotta", "mint-fresh", "sunset-amber", "lavender-dream"]),
         ("活力动态", ["sports", "bauhaus", "chinese", "wechat-native"]),
         ("模板布局", ["minimal-gold", "focus-blue", "elegant-green", "bold-blue"]),
     ]
+
     buttons_html = ""
     btn_index = 0
-    for group_name, group_ids in GROUPS:
+    for group_name, group_ids in groups:
         group_tids = [t for t in group_ids if t in theme_ids]
         if not group_tids:
             continue
@@ -1542,16 +1582,59 @@ def generate_gallery(rendered_map: dict, theme_map: dict,
                 f'{name}{rec_label}</button>'
             )
             btn_index += 1
-        buttons_html += '</div>\n'
+        buttons_html += "</div>\n"
 
-    # 生成 THEME_PREVIEWS
     previews_html = ""
     for i, tid in enumerate(theme_ids):
         display = "block" if i == 0 else "none"
         previews_html += (
-            f'<div class="theme-preview" data-theme="{tid}" '
-            f'style="display:{display}">{rendered_map[tid]}</div>\n'
+            f'<div class="theme-preview" data-theme="{tid}" style="display:{display}">{rendered_map[tid]}</div>\n'
         )
+    default_theme = theme_ids[0] if theme_ids else ""
+    return buttons_html, previews_html, default_theme
+
+
+def render_publish_console_page(bundle: dict, session: dict, output_path: Path, recommended=None):
+    template_path = TEMPLATE_DIR / "publish_console.html"
+    template = template_path.read_text(encoding="utf-8")
+    buttons_html, previews_html, default_theme = _build_theme_buttons_and_previews(
+        bundle["theme_map"],
+        bundle["theme_ids"],
+        bundle["rendered_map"],
+        recommended=recommended,
+    )
+    session_json = json.dumps(session, ensure_ascii=False)
+    html = (
+        template
+        .replace("{{ARTICLE_TITLE}}", bundle["title"])
+        .replace("{{WORD_COUNT}}", f"{bundle['word_count']:,}")
+        .replace("{{THEME_BUTTONS}}", buttons_html)
+        .replace("{{THEME_PREVIEWS}}", previews_html)
+        .replace("{{DEFAULT_THEME}}", session.get("current_theme") or default_theme)
+        .replace("{{SESSION_JSON}}", session_json)
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    return output_path
+
+
+def generate_gallery(rendered_map: dict, theme_map: dict,
+                     theme_ids: list, title: str, word_count: int,
+                     output_dir: Path, recommended: list = None):
+    """生成主题画廊页面（单预览区 + 切换按钮模式）"""
+    if recommended is None:
+        recommended = []
+    template_path = TEMPLATE_DIR / "gallery.html"
+    template = template_path.read_text(encoding="utf-8")
+
+    default_theme = theme_ids[0] if theme_ids else ""
+
+    buttons_html, previews_html, default_theme = _build_theme_buttons_and_previews(
+        theme_map,
+        theme_ids,
+        rendered_map,
+        recommended=recommended,
+    )
 
     gallery_html = (
         template
