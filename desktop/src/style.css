@@ -269,6 +269,11 @@ textarea {
   border-color: rgba(255, 179, 71, 0.35);
 }
 
+.status-chip.is-danger {
+  color: var(--bad);
+  border-color: rgba(255, 111, 145, 0.35);
+}
+
 textarea {
   min-height: 220px;
   resize: vertical;

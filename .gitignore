@@ -25,6 +25,7 @@ publish_records.csv
 *.md
 !README.md
 !README_EN.md
+!docs/manual-validation/*.md
 !requirements.txt
 *.docx
 comment_state.json

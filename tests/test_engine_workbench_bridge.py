@@ -103,6 +103,104 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertTrue(payload["browser"]["remote_debugging_required"])
         self.assertIn("zhihu", payload["browser"]["browser_platforms"])
 
+    def test_discover_resources_includes_runtime_root_and_python(self):
+        from tiandi_engine.workbench.bridge import discover_resources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            payload = discover_resources(base)
+
+        self.assertEqual(payload["runtime"]["repo_root"], str(base.resolve()))
+        self.assertTrue(payload["runtime"]["python_executable"])
+
+    def test_discover_resources_includes_browser_session_settings(self):
+        from tiandi_engine.workbench.bridge import discover_resources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            payload = discover_resources(base)
+
+        self.assertTrue(payload["browser"]["managed_session"]["enabled"])
+        self.assertEqual(payload["browser"]["managed_session"]["debug_port"], 9333)
+        self.assertIn(".tiandidistribute", payload["browser"]["managed_session"]["profile_dir"])
+
+    def test_discover_resources_reads_browser_session_state(self):
+        from tiandi_engine.workbench.bridge import discover_resources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            session_dir = base / ".tiandidistribute" / "browser-session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "mode": "managed",
+                        "last_checked_at": "2026-03-28T12:00:00",
+                        "platforms": {
+                            "zhihu": {
+                                "status": "expiring_soon",
+                                "last_healthy_at": "2026-03-20T12:00:00",
+                                "last_reminded_at": "2026-03-27T12:00:00",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = discover_resources(base)
+
+        self.assertEqual(payload["browser"]["session_state"]["mode"], "managed")
+        self.assertEqual(payload["browser"]["session_state"]["platforms"]["zhihu"]["status"], "expiring_soon")
+
+    def test_discover_resources_marks_stale_healthy_session_as_expiring_soon(self):
+        from tiandi_engine.workbench.bridge import discover_resources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "config.json").write_text(
+                """
+{
+  "browser_session": {
+    "remind_after_days": 5
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+            session_dir = base / ".tiandidistribute" / "browser-session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "mode": "managed",
+                        "platforms": {
+                            "zhihu": {
+                                "status": "healthy",
+                                "last_healthy_at": "2026-03-20T12:00:00",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("tiandi_engine.workbench.bridge.time.time", return_value=1774785600):
+                payload = discover_resources(base)
+
+        self.assertEqual(payload["browser"]["session_state"]["platforms"]["zhihu"]["status"], "expiring_soon")
+
+    def test_discover_resources_returns_config_warning_when_config_json_invalid(self):
+        from tiandi_engine.workbench.bridge import discover_resources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "config.json").write_text("{broken", encoding="utf-8")
+
+            payload = discover_resources(base)
+
+        self.assertIn("config.json", payload["config_warning"] or "")
+
     def test_plan_publish_job_creates_assignments_and_staged_markdown(self):
         from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
 
@@ -344,6 +442,131 @@ class WorkbenchBridgeTests(unittest.TestCase):
 
         self.assertEqual(history["last_plan"]["publish_job"]["job_id"], "plan-1")
         self.assertEqual(history["last_result"]["publish_job"]["status"], "failed")
+        self.assertEqual(history["recovery"]["status"], "recoverable")
+
+    def test_read_recent_history_tolerates_corrupt_snapshots_and_reports_state(self):
+        from tiandi_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workbench_dir = base / ".tiandidistribute" / "workbench"
+            session_dir = base / ".tiandidistribute" / "publish-console"
+            workbench_dir.mkdir(parents=True)
+            session_dir.mkdir(parents=True)
+            (workbench_dir / "last-plan.json").write_text("{not-json", encoding="utf-8")
+            (session_dir / "publish-console-session.json").write_text(
+                '{"summary":{"total_articles":1},"items":[{"article_id":"a1"}]}',
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertIsNone(history["last_plan"])
+        self.assertEqual(history["recovery"]["status"], "snapshot_corrupted")
+        self.assertIn("last_plan", history["recovery"]["issues"])
+
+    def test_read_recent_history_reports_result_missing_when_only_plan_exists(self):
+        from tiandi_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            (workbench_dir / "last-plan.json").write_text(
+                json.dumps(
+                    {
+                        "publish_job": {
+                            "job_id": "plan-only",
+                            "article_ids": ["a1"],
+                            "platforms": ["zhihu"],
+                            "status": "pending",
+                            "current_step": "",
+                            "success_count": 0,
+                            "failure_count": 0,
+                            "skip_count": 0,
+                            "recoverable": True,
+                            "error_summary": "",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertEqual(history["recovery"]["status"], "result_missing")
+
+    def test_read_recent_history_marks_restore_unavailable_when_staged_markdown_missing(self):
+        from tiandi_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            (workbench_dir / "last-plan.json").write_text(
+                json.dumps(
+                    {
+                        "publish_job": {
+                            "job_id": "plan-restore",
+                            "article_ids": ["a1"],
+                            "platforms": ["zhihu"],
+                            "status": "pending",
+                            "current_step": "",
+                            "success_count": 0,
+                            "failure_count": 0,
+                            "skip_count": 0,
+                            "recoverable": True,
+                            "error_summary": "",
+                        },
+                        "staged_articles": [
+                            {
+                                "article_id": "a1",
+                                "markdown_path": str(base / ".tiandidistribute" / "workbench" / "articles" / "missing.md"),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertFalse(history["recovery"]["can_restore_plan"])
+        self.assertEqual(len(history["recovery"]["missing_staged_articles"]), 1)
+
+    def test_plan_publish_job_preserves_last_result_without_explicit_reset(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            last_result = workbench_dir / "last-result.json"
+            last_result.write_text('{"publish_job":{"job_id":"old-job","status":"failed"}}', encoding="utf-8")
+            imported = import_sources(base, import_mode="paste", pasted_text="标题\n\n正文")
+
+            plan_publish_job(base, drafts=imported["job"]["drafts"], platforms=["wechat"], mode="draft")
+            self.assertTrue(last_result.exists())
+
+    def test_plan_publish_job_can_explicitly_reset_last_result(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            last_result = workbench_dir / "last-result.json"
+            last_result.write_text('{"publish_job":{"job_id":"old-job","status":"failed"}}', encoding="utf-8")
+            imported = import_sources(base, import_mode="paste", pasted_text="标题\n\n正文")
+
+            plan_publish_job(
+                base,
+                drafts=imported["job"]["drafts"],
+                platforms=["wechat"],
+                mode="draft",
+                clear_last_result=True,
+            )
+            self.assertFalse(last_result.exists())
 
     def test_handle_bridge_command_routes_json_requests(self):
         from tiandi_engine.workbench.bridge import handle_bridge_command
@@ -399,6 +622,24 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIn("WECHAT_APPID=wx_app_123", content)
         self.assertIn("WECHAT_SECRET=secret_456", content)
         self.assertIn("WECHAT_AUTHOR=Wizard", content)
+
+    def test_save_wechat_settings_does_not_clear_existing_values_without_explicit_clear(self):
+        from tiandi_engine.workbench.bridge import read_wechat_settings, save_wechat_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            env_path = base / "secrets.env"
+            env_path.write_text(
+                "WECHAT_APPID=keep-app\nWECHAT_SECRET=keep-secret\nWECHAT_AUTHOR=keep-author\n",
+                encoding="utf-8",
+            )
+
+            save_wechat_settings(base, app_id="", secret="", author="")
+            reread = read_wechat_settings(base)
+
+        self.assertEqual(reread["app_id"], "keep-app")
+        self.assertEqual(reread["secret"], "keep-secret")
+        self.assertEqual(reread["author"], "keep-author")
 
     def test_discover_resources_includes_wechat_status(self):
         from tiandi_engine.workbench.bridge import discover_resources, save_wechat_settings

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import sys
+import tempfile
 import time
 import uuid
 from dataclasses import replace
@@ -19,10 +22,16 @@ WORKBENCH_ROOT = Path(".tiandidistribute") / "workbench"
 LAST_PLAN_PATH = WORKBENCH_ROOT / "last-plan.json"
 LAST_RESULT_PATH = WORKBENCH_ROOT / "last-result.json"
 SESSION_PATH = Path(".tiandidistribute") / "publish-console" / "publish-console-session.json"
+BROWSER_SESSION_STATE_PATH = Path(".tiandidistribute") / "browser-session" / "state.json"
 RECORDS_PATH = Path("publish_records.csv")
 SUCCESS_STATUSES = {"published", "draft_only", "success_unknown"}
 SKIP_STATUSES = {"skipped_existing"}
 BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian")
+REPO_IDENTITY_MARKERS = (
+    Path("scripts") / "workbench_bridge.py",
+    Path("publish.py"),
+    Path("tiandi_engine") / "workbench" / "bridge.py",
+)
 
 
 def _now_iso() -> str:
@@ -34,7 +43,28 @@ def _new_job_id(prefix: str) -> str:
 
 
 def _ensure_base_dir(base_dir) -> Path:
-    return Path(base_dir).expanduser().resolve()
+    root = Path(base_dir).expanduser().resolve()
+    if os.getenv("ORDO_ENFORCE_REPO_IDENTITY") == "1":
+        missing = [str(root / marker) for marker in REPO_IDENTITY_MARKERS if not (root / marker).is_file()]
+        if missing:
+            raise ValueError(f"当前工作目录不是有效的 Ordo 仓库根目录，缺少: {', '.join(missing)}")
+    return root
+
+
+def _write_atomic_text(path: Path, text: str, *, encoding: str = "utf-8", newline: Optional[str] = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
+            handle.write(text)
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _coerce_path(value) -> Optional[Path]:
@@ -44,14 +74,94 @@ def _coerce_path(value) -> Optional[Path]:
 
 
 def _write_json_snapshot(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_atomic_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_json_snapshot_state(path: Path):
+    if not path.exists():
+        return {"status": "missing", "payload": None, "error": None}
+    try:
+        return {
+            "status": "ok",
+            "payload": json.loads(path.read_text(encoding="utf-8")),
+            "error": None,
+        }
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "corrupt", "payload": None, "error": str(exc)}
 
 
 def _read_json_snapshot(path: Path):
-    if not path.exists():
+    return _read_json_snapshot_state(path)["payload"]
+
+
+def _parse_iso_datetime(value) -> Optional[float]:
+    if not value:
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return time.mktime(time.strptime(str(value), "%Y-%m-%dT%H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _browser_session_state_payload(base_dir: Path, config) -> Mapping[str, object]:
+    settings = config.get_browser_session_settings()
+    payload = _read_json_snapshot(base_dir / BROWSER_SESSION_STATE_PATH)
+    if not isinstance(payload, Mapping):
+        payload = {}
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, Mapping):
+        platforms = {}
+    projected_platforms = {}
+    expiring_platforms = []
+    relogin_required_platforms = []
+    now_ts = time.time()
+    now_iso = _now_iso()
+    remind_after_seconds = int(settings["remind_after_days"]) * 24 * 60 * 60
+    raw_platforms = dict(platforms)
+    should_persist_reminder = False
+    for platform, raw_entry in platforms.items():
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = dict(raw_entry)
+        status = str(entry.get("status") or "")
+        last_healthy_at = _parse_iso_datetime(entry.get("last_healthy_at"))
+        if status == "healthy" and last_healthy_at and (now_ts - last_healthy_at) >= remind_after_seconds:
+            status = "expiring_soon"
+        entry["status"] = status or "healthy"
+        if entry["status"] in {"expiring_soon", "expired_or_relogin_required"} and not entry.get("last_reminded_at"):
+            entry["last_reminded_at"] = now_iso
+            should_persist_reminder = True
+        raw_platforms[str(platform)] = entry
+        projected_platforms[str(platform)] = entry
+        if entry["status"] == "expiring_soon":
+            expiring_platforms.append(str(platform))
+        if entry["status"] == "expired_or_relogin_required":
+            relogin_required_platforms.append(str(platform))
+    if should_persist_reminder:
+        persisted = dict(payload)
+        persisted["platforms"] = raw_platforms
+        persisted["updated_at"] = persisted.get("updated_at") or now_iso
+        _write_json_snapshot(base_dir / BROWSER_SESSION_STATE_PATH, persisted)
+    return {
+        "mode": str(payload.get("mode") or ("managed" if settings["enabled"] else "fallback_system_browser")),
+        "last_checked_at": payload.get("last_checked_at"),
+        "updated_at": payload.get("updated_at"),
+        "platforms": projected_platforms,
+        "expiring_platforms": expiring_platforms,
+        "relogin_required_platforms": relogin_required_platforms,
+    }
+
+
+def _read_csv_records_state(path: Path):
+    if not path.exists():
+        return {"status": "missing", "rows": [], "error": None}
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+        return {"status": "ok", "rows": rows, "error": None}
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        return {"status": "corrupt", "rows": [], "error": str(exc)}
 
 
 def _coerce_draft(raw) -> ArticleDraft:
@@ -117,8 +227,9 @@ def _wechat_settings_payload(base_dir: Path):
     }
 
 
-def _write_simple_env_updates(env_path: Path, updates: Mapping[str, str]):
-    normalized = {str(key): str(value) for key, value in updates.items()}
+def _write_simple_env_updates(env_path: Path, updates: Mapping[str, Optional[str]], clear_fields: Sequence[str] = ()):
+    normalized = {str(key): (None if value is None else str(value)) for key, value in updates.items()}
+    clear_keys = {str(item) for item in clear_fields}
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     seen = set()
     out = []
@@ -130,13 +241,23 @@ def _write_simple_env_updates(env_path: Path, updates: Mapping[str, str]):
         key, _old_value = raw_line.split("=", 1)
         key = key.strip()
         if key in normalized:
-            out.append(f"{key}={normalized[key]}")
             seen.add(key)
+            if key in clear_keys:
+                out.append(f"{key}=")
+                continue
+            value = normalized[key]
+            if value not in (None, ""):
+                out.append(f"{key}={value}")
+            else:
+                out.append(raw_line)
         else:
             out.append(raw_line)
     for key, value in normalized.items():
         if key not in seen:
-            out.append(f"{key}={value}")
+            if key in clear_keys:
+                out.append(f"{key}=")
+            elif value not in (None, ""):
+                out.append(f"{key}={value}")
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 
@@ -150,7 +271,7 @@ def read_wechat_settings(base_dir):
     }
 
 
-def save_wechat_settings(base_dir, *, app_id="", secret="", author=""):
+def save_wechat_settings(base_dir, *, app_id=None, secret=None, author=None, clear_fields: Sequence[str] = ()):
     root = _ensure_base_dir(base_dir)
     env_path = root / "secrets.env"
     _write_simple_env_updates(
@@ -160,6 +281,7 @@ def save_wechat_settings(base_dir, *, app_id="", secret="", author=""):
             "WECHAT_SECRET": secret,
             "WECHAT_AUTHOR": author,
         },
+        clear_fields=clear_fields,
     )
     return read_wechat_settings(root)
 
@@ -249,7 +371,14 @@ def discover_resources(base_dir):
             "browser_platforms": list(BROWSER_PLATFORMS),
             "remote_debugging_required": True,
             "login_required_platforms": list(BROWSER_PLATFORMS),
+            "managed_session": config.get_browser_session_settings(),
+            "session_state": _browser_session_state_payload(root, config),
         },
+        "runtime": {
+            "repo_root": str(root),
+            "python_executable": sys.executable,
+        },
+        "config_warning": config.project_config_warning,
         "defaults": {
             "template_mode": config.get_default_template_mode(),
             "cover_repeat_window": config.get_cover_repeat_window(),
@@ -270,6 +399,7 @@ def plan_publish_job(
     seed: Optional[int] = None,
     recent_cover_paths: Optional[Sequence[str]] = None,
     job_id: Optional[str] = None,
+    clear_last_result: bool = False,
 ):
     root = _ensure_base_dir(base_dir)
     config = load_engine_config(root)
@@ -355,7 +485,7 @@ def plan_publish_job(
     }
     _write_json_snapshot(root / LAST_PLAN_PATH, plan_payload)
     last_result_path = root / LAST_RESULT_PATH
-    if last_result_path.exists():
+    if clear_last_result and last_result_path.exists():
         last_result_path.unlink()
     return plan_payload
 
@@ -491,22 +621,69 @@ def read_recent_history(base_dir, *, limit: int = 20):
     root = _ensure_base_dir(base_dir)
     records_path = root / RECORDS_PATH
     session_path = root / SESSION_PATH
-    records = []
-    if records_path.exists():
-        with records_path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            rows = list(reader)
-        records = rows[-max(0, int(limit)) :] if limit is not None else rows
-    session = None
-    if session_path.exists():
-        session = json.loads(session_path.read_text(encoding="utf-8"))
-    last_plan = _read_json_snapshot(root / LAST_PLAN_PATH)
-    last_result = _read_json_snapshot(root / LAST_RESULT_PATH)
+    records_state = _read_csv_records_state(records_path)
+    rows = records_state["rows"]
+    records = rows[-max(0, int(limit)) :] if limit is not None else rows
+    session_state = _read_json_snapshot_state(session_path)
+    last_plan_state = _read_json_snapshot_state(root / LAST_PLAN_PATH)
+    last_result_state = _read_json_snapshot_state(root / LAST_RESULT_PATH)
+    session = session_state["payload"]
+    last_plan = last_plan_state["payload"]
+    last_result = last_result_state["payload"]
+    missing_staged_articles = []
+    for item in (last_plan or {}).get("staged_articles", []):
+        markdown_path = Path(str(item.get("markdown_path") or "")).expanduser()
+        if not markdown_path.is_absolute():
+            markdown_path = (root / markdown_path).resolve()
+        if not markdown_path.exists():
+            missing_staged_articles.append(
+                {
+                    "article_id": item.get("article_id"),
+                    "markdown_path": str(markdown_path),
+                }
+            )
+    issues = [
+        name
+        for name, state in (
+            ("records", records_state),
+            ("session", session_state),
+            ("last_plan", last_plan_state),
+            ("last_result", last_result_state),
+        )
+        if state["status"] == "corrupt"
+    ]
+    current_job_id = (last_plan or {}).get("publish_job", {}).get("job_id")
+    result_job_id = (last_result or {}).get("publish_job", {}).get("job_id")
+    if issues:
+        recovery_status = "snapshot_corrupted"
+    elif missing_staged_articles:
+        recovery_status = "result_missing"
+    elif last_plan and last_result and current_job_id and current_job_id == result_job_id:
+        recovery_status = "recoverable"
+    elif session and not last_plan and not last_result:
+        recovery_status = "session_only"
+    elif last_plan or last_result or session:
+        recovery_status = "result_missing"
+    else:
+        recovery_status = "empty"
+    can_restore_plan = bool(last_plan) and not issues and not missing_staged_articles
+    failure_count = int((last_result or {}).get("publish_job", {}).get("failure_count") or 0)
+    has_failed_results = failure_count > 0 or any(
+        item.get("status") not in SUCCESS_STATUSES and item.get("status") not in SKIP_STATUSES
+        for item in (last_result or {}).get("results", [])
+    )
     return {
         "records": records,
         "session": session,
         "last_plan": last_plan,
         "last_result": last_result,
+        "recovery": {
+            "status": recovery_status,
+            "issues": issues,
+            "missing_staged_articles": missing_staged_articles,
+            "can_restore_plan": can_restore_plan,
+            "can_restore_failures": can_restore_plan and bool(last_result) and has_failed_results,
+        },
     }
 
 
@@ -530,9 +707,10 @@ def handle_bridge_command(base_dir, payload, *, registry=None, append_record=Non
     if command == "save_wechat_settings":
         return save_wechat_settings(
             base_dir,
-            app_id=str(payload.get("app_id", "")),
-            secret=str(payload.get("secret", "")),
-            author=str(payload.get("author", "")),
+            app_id=str(payload["app_id"]) if "app_id" in payload and payload.get("app_id") is not None else None,
+            secret=str(payload["secret"]) if "secret" in payload and payload.get("secret") is not None else None,
+            author=str(payload["author"]) if "author" in payload and payload.get("author") is not None else None,
+            clear_fields=tuple(payload.get("clear_fields", ()) or ()),
         )
     if command == "plan_publish_job":
         return plan_publish_job(
@@ -547,6 +725,7 @@ def handle_bridge_command(base_dir, payload, *, registry=None, append_record=Non
             seed=payload.get("seed"),
             recent_cover_paths=payload.get("recent_cover_paths"),
             job_id=payload.get("job_id"),
+            clear_last_result=payload.get("clear_last_result", False),
         )
     if command == "run_publish_job":
         return run_publish_job(

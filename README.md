@@ -15,7 +15,7 @@
 - 一次写作，多平台分发
 - 微信有完整主题系统、画廊预览和本地 dry-run
 - AI 封面默认优先启用，配置好后会先尝试生成，再回退到本地封面
-- 浏览器平台复用同一个远程调试 Chrome，会话更稳定
+- 浏览器平台默认复用 Ordo 托管浏览器会话，首次登录一次即可，并支持临近失效提醒
 - 评论自动回复可独立运行，不强绑定主发布流程
 - 仓库已做公开化整理，不包含真实密钥、个人路径和本机调度配置
 
@@ -63,6 +63,27 @@ python3 -m pip install -r requirements.txt
 
 ```bash
 cp secrets.env.example secrets.env
+```
+
+### 2. 浏览器托管会话配置
+
+默认情况下，Ordo 会启用托管浏览器会话，并优先复用：
+
+- 专用资料目录：`.tiandidistribute/browser-session/profile`
+- 固定调试端口：`9333`
+- 会话状态文件：`.tiandidistribute/browser-session/state.json`
+
+如需覆盖，可在 `config.json` 里加入：
+
+```json
+{
+  "browser_session": {
+    "enabled": true,
+    "remind_after_days": 5,
+    "profile_dir": ".tiandidistribute/browser-session/profile",
+    "debug_port": 9333
+  }
+}
 ```
 
 ```env
@@ -135,9 +156,13 @@ npm run tauri:dev
 - `遇错继续` 开关会透传到引擎侧发布计划
 - 失败后可切换到“仅重试失败项”的最小续跑计划，即使失败项不是 `retryable` 也能恢复成新的最小计划
 - 会保存最近一次工作台计划与结果快照，桌面重开后可恢复上次任务或上次失败项
+- 如果最近计划里的 staged Markdown 已缺失，恢复按钮会禁用并明确提示需要重新规划
+- 顶部会显示当前实际 `Repo Root` / `Python` 路径，定位 `ORDO_REPO_ROOT` / `ORDO_PYTHON` 更直接
 - 发起发布并实时回看结构化日志
 - 发布后可直接查看平台级结果详情与失败摘要，登录失效 / 环境未就绪 / 页面结构变动会显示更明确的提示
 - 读取最近发布记录与最近 session 快照
+- `config.json` 解析失败会作为显式 warning 暴露到桌面资源提示与 CLI 预检，而不是静默降级
+- 顶部状态区会并列显示微信状态和浏览器会话状态；当前是托管模式、回退系统 Chrome、临近失效还是需要重新登录，都会直接展示
 
 封面接入补充说明：
 
@@ -237,9 +262,10 @@ python3 reply_comments.py --dry-run
 
 推荐做法：
 
-1. 打开同一个启用远程调试的 Chrome 实例
-2. 在这个实例里登录知乎、头条号、简书、一点号
-3. 先用 `--mode draft` 试跑
+1. 首次运行时，让 Ordo 自动拉起托管浏览器，或手动打开同一套托管 profile
+2. 在这套托管浏览器里登录知乎、头条号、简书、一点号
+3. 后续继续复用这套资料目录，不必每次重新授权
+4. 先用 `--mode draft` 试跑
 4. 再切 `--mode publish`
 
 主入口默认会：
@@ -250,16 +276,35 @@ python3 reply_comments.py --dry-run
 - 复用固定 workbench
 - 在正式执行前做预检
 - 从本地封面池为**非微信平台**自动分配封面（与微信的 `covers/cover_*.png` / AI 封面策略相互独立，详见 `tiandi_engine` 配置）
+- 优先连接 Ordo 托管浏览器实例，再回退到现有系统 Chrome / `DevToolsActivePort` 线索
+
+托管浏览器会话补充说明：
+
+- 第一次需要在 Ordo 托管的浏览器资料目录里完成登录；之后默认长期复用
+- 最近一次健康确认时间会写入 `.tiandidistribute/browser-session/state.json`
+- 如果会话长时间未重新校验，桌面工作台会给出“临近失效”提醒
+- 如果预检已经落到登录页或验证码态，桌面工作台会明确提示需要重新登录
 
 桌面工作台现在也会在执行区直接提示：
 
 - 浏览器平台需要 Chrome 远程调试
 - 浏览器平台默认依赖现有登录态
+- 浏览器平台现在会额外预检“当前页面是否已停留在可写编辑器态”
 - 这些平台的页面结构仍可能随站点改版而失效
+- 当前 `config.json` 是否损坏
+
+### 浏览器平台 Smoke 清单
+
+最小 smoke 清单与本轮验证记录见：
+
+- `docs/manual-validation/2026-03-28-browser-smoke.md`
+- `docs/manual-validation/2026-03-28-browser-session.md`
+
+最近一轮真实 smoke 入口记录：`2026-03-28`，当前环境阻塞在“未检测到远程调试 Chrome 标签页”，尚未进入带登录态的真实站点草稿写入。
 
 ### 结构化结果与 GUI 消费
 
-每条平台执行结束后，除原有日志外会额外输出一行 `[META]` 前缀的 JSON，字段包括：`article_id`、`theme_name`、`template_mode`、`cover_path`、`platform`、`status`、`error_type`。后续桌面 GUI 或外部脚本可直接解析，无需再从散落的 stdout 推断状态。
+每条平台执行结束后，除原有日志外会额外输出一行 `[META]` 前缀的 JSON，字段包括：`article_id`、`theme_name`、`template_mode`、`cover_path`、`platform`、`status`、`error_type`、`current_url`、`page_state`、`smoke_step`。后续桌面 GUI 或外部脚本可直接解析，无需再从散落的 stdout 推断状态。
 
 `publish_records.csv` 会写入与上述一致的列。若你仍在使用旧版仅有 8 列的 CSV，首次按新逻辑追加记录时会**自动迁移**为扩展表头（建议在版本升级后备份该文件）。
 
@@ -274,6 +319,7 @@ python3 reply_comments.py --dry-run
 - 正式 Windows 分发：当前已补齐基础浏览器启动路径，但 Windows 安装器、签名和分发流程仍未完成
 - 产品级恢复：当前是“最近计划/结果快照 + 失败项续跑”的最小闭环，还不是完整断点续跑系统
 - 密钥与本地数据安全：`secrets.env`、`config.json`、`publish_records.csv` 仍属于本地工程态存储，后续如要正式分发还需要单独治理
+- 真实外站 smoke：仓库里已经补了一轮真实执行入口记录，但当前环境阻塞于“无远程调试 Chrome 标签页”；带登录态的真实草稿写入仍需要在用户自己的浏览器环境里补跑通过
 
 ## 常用 CDP 命令
 

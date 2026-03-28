@@ -27,7 +27,7 @@ import type {
 import { describeCoverPoolStatus } from './coverStatus'
 import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
 import { buildWechatBlockingMessage, describeWechatStatus } from './wechatStatus'
-import { buildResourceHints, describePublishResult } from './workbenchFeedback'
+import { buildResourceHints, describeBrowserSessionSummary, describePublishResult } from './workbenchFeedback'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 
@@ -143,6 +143,10 @@ function themeOptions(): ThemeEntry[] {
 
 function wechatStatus(): WechatConfigStatus {
   return state.resources?.wechat.status ?? EMPTY_WECHAT_STATUS
+}
+
+function browserSessionSummary() {
+  return describeBrowserSessionSummary(state.resources)
 }
 
 function logLine(text: string) {
@@ -842,6 +846,7 @@ function renderModal() {
 
 function render() {
   const article = selectedArticle()
+  const browserSession = browserSessionSummary()
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
@@ -853,6 +858,9 @@ function render() {
         <div class="topbar__actions">
           <span class="status-chip ${wechatStatus().appid_ready && wechatStatus().secret_ready ? 'is-ready' : 'is-pending'}">
             ${describeWechatStatus(wechatStatus())}
+          </span>
+          <span class="status-chip ${browserSession.tone === 'ready' ? 'is-ready' : browserSession.tone === 'danger' ? 'is-danger' : 'is-pending'}">
+            ${escapeHtml(browserSession.text)}
           </span>
           <button class="ghost-button" data-action="open-settings-modal">设置</button>
           <button class="ghost-button" data-action="open-paste-modal">粘贴导入</button>

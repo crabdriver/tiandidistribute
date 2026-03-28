@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -24,14 +25,14 @@ def load_simple_env_file(env_path: Path) -> Dict[str, str]:
     return values
 
 
-def load_json_config(base_dir: Path) -> Dict:
+def load_json_config(base_dir: Path) -> Tuple[Dict, Optional[str]]:
     path = Path(base_dir) / "config.json"
     if not path.exists():
-        return {}
+        return {}, None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except json.JSONDecodeError as exc:
+        return {}, f"config.json 解析失败：{exc}"
 
 
 def _is_real_value(value: Optional[str]) -> bool:
@@ -54,6 +55,7 @@ def _nested_get(data: Mapping, keys, default=None):
 class EngineConfig:
     base_dir: Path
     project_config: Dict = field(default_factory=dict)
+    project_config_warning: Optional[str] = None
     env_file_values: Dict[str, str] = field(default_factory=dict)
     environ: Dict[str, str] = field(default_factory=dict)
     cli_overrides: Dict[str, str] = field(default_factory=dict)
@@ -106,6 +108,31 @@ class EngineConfig:
     def get_default_template_mode(self) -> str:
         raw = _nested_get(self.project_config, ("assignment", "default_template_mode"), "default")
         return str(raw or "default")
+
+    def get_browser_session_settings(self) -> Dict[str, object]:
+        enabled = _nested_get(self.project_config, ("browser_session", "enabled"))
+        remind_after_days = _nested_get(self.project_config, ("browser_session", "remind_after_days"), 5)
+        debug_port = _nested_get(self.project_config, ("browser_session", "debug_port"), 9333)
+        profile_dir = _nested_get(self.project_config, ("browser_session", "profile_dir"))
+        if profile_dir:
+            profile_path = Path(str(profile_dir))
+            resolved_profile_dir = profile_path if profile_path.is_absolute() else (self.base_dir / profile_path)
+        else:
+            resolved_profile_dir = self.base_dir / ".tiandidistribute" / "browser-session" / "profile"
+        try:
+            remind_after_days = max(1, int(remind_after_days))
+        except (TypeError, ValueError):
+            remind_after_days = 5
+        try:
+            debug_port = max(1, int(debug_port))
+        except (TypeError, ValueError):
+            debug_port = 9333
+        return {
+            "enabled": True if enabled is None else bool(enabled),
+            "remind_after_days": remind_after_days,
+            "debug_port": debug_port,
+            "profile_dir": str(resolved_profile_dir),
+        }
 
     def discover_theme_pool(self) -> Dict[str, object]:
         themes_dir = self.resolve_themes_dir()
@@ -161,10 +188,12 @@ class EngineConfig:
 
 def load_engine_config(base_dir, cli_overrides=None, environ=None):
     base_path = Path(base_dir)
+    project_config, project_config_warning = load_json_config(base_path)
     return EngineConfig(
         base_dir=base_path,
-        project_config=load_json_config(base_path),
+        project_config=project_config,
+        project_config_warning=project_config_warning,
         env_file_values=load_simple_env_file(base_path / "secrets.env"),
-        environ=dict(environ or {}),
+        environ=dict(os.environ if environ is None else environ),
         cli_overrides=dict(cli_overrides or {}),
     )

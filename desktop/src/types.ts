@@ -68,16 +68,51 @@ export interface BrowserRequirements {
   browser_platforms: Platform[]
   remote_debugging_required: boolean
   login_required_platforms: Platform[]
+  managed_session: BrowserManagedSession
+  session_state: BrowserSessionState
+}
+
+export interface BrowserManagedSession {
+  enabled: boolean
+  remind_after_days: number
+  profile_dir: string
+  debug_port: number
+}
+
+export interface BrowserSessionPlatformState {
+  status: string
+  last_checked_at?: string | null
+  last_healthy_at?: string | null
+  last_relogin_required_at?: string | null
+  last_reminded_at?: string | null
+  current_url?: string | null
+  page_state?: string | null
+}
+
+export interface BrowserSessionState {
+  mode: string
+  last_checked_at: string | null
+  updated_at?: string | null
+  platforms: Record<string, BrowserSessionPlatformState>
+  expiring_platforms: Platform[]
+  relogin_required_platforms: Platform[]
+}
+
+export interface RuntimeDiagnostics {
+  repo_root: string
+  python_executable: string
 }
 
 export interface BridgeResources {
   theme_pool: ThemePool
   cover_pool: CoverPool
+  config_warning: string | null
   wechat: {
     settings: WechatSettings
     status: WechatConfigStatus
   }
   browser: BrowserRequirements
+  runtime: RuntimeDiagnostics
   defaults: {
     template_mode: string
     cover_repeat_window: number
@@ -148,11 +183,23 @@ export interface PublishResult {
   results: Array<Record<string, unknown>>
 }
 
+export interface HistoryRecovery {
+  status: 'recoverable' | 'snapshot_corrupted' | 'result_missing' | 'session_only' | 'empty'
+  issues: string[]
+  missing_staged_articles: Array<{
+    article_id: string
+    markdown_path: string
+  }>
+  can_restore_plan: boolean
+  can_restore_failures: boolean
+}
+
 export interface HistoryPayload {
   records: Array<Record<string, string>>
   session: Record<string, unknown> | null
   last_plan: PublishPlan | null
   last_result: PublishResult | null
+  recovery: HistoryRecovery
 }
 
 export interface PublishEvent {

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tiandi_engine.config import EngineConfig, load_engine_config
 from tiandi_engine.models.task import build_task_spec
@@ -48,6 +49,64 @@ class EngineTaskModelTests(unittest.TestCase):
 
 
 class EngineConfigTests(unittest.TestCase):
+    def test_browser_session_uses_managed_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = load_engine_config(Path(tmpdir))
+
+        browser_session = config.get_browser_session_settings()
+        self.assertTrue(browser_session["enabled"])
+        self.assertEqual(browser_session["debug_port"], 9333)
+        self.assertEqual(browser_session["remind_after_days"], 5)
+        self.assertIn(".tiandidistribute", browser_session["profile_dir"])
+
+    def test_browser_session_allows_config_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "config.json").write_text(
+                json_text := """
+{
+  "browser_session": {
+    "enabled": false,
+    "remind_after_days": 9,
+    "profile_dir": ".ordo-browser-profile",
+    "debug_port": 9555
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+            self.assertTrue(json_text)
+            config = load_engine_config(base_dir)
+
+        browser_session = config.get_browser_session_settings()
+        self.assertFalse(browser_session["enabled"])
+        self.assertEqual(browser_session["debug_port"], 9555)
+        self.assertEqual(browser_session["remind_after_days"], 9)
+        self.assertTrue(browser_session["profile_dir"].endswith(".ordo-browser-profile"))
+
+    def test_load_engine_config_uses_process_env_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            "os.environ",
+            {
+                "WECHAT_APPID": "process-app",
+                "WECHAT_SECRET": "process-secret",
+                "WECHAT_AUTHOR": "process-author",
+            },
+            clear=False,
+        ):
+            config = load_engine_config(Path(tmpdir))
+
+        self.assertEqual(config.resolve_wechat_credentials(), ("process-app", "process-secret", "process-author"))
+
+    def test_load_engine_config_reports_invalid_config_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "config.json").write_text("{broken", encoding="utf-8")
+
+            config = load_engine_config(base_dir)
+
+        self.assertIn("config.json", config.project_config_warning or "")
+
     def test_load_engine_config_prefers_cli_over_env_and_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)

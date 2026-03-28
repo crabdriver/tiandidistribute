@@ -94,7 +94,23 @@ const basePlan: PublishPlan = {
       browser_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
       remote_debugging_required: true,
       login_required_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+      managed_session: {
+        enabled: true,
+        remind_after_days: 5,
+        profile_dir: '.tiandidistribute/browser-session/profile',
+        debug_port: 9333,
+      },
+      session_state: {
+        mode: 'managed',
+        last_checked_at: null,
+        updated_at: null,
+        platforms: {},
+        expiring_platforms: [],
+        relogin_required_platforms: [],
+      },
     },
+    runtime: { repo_root: '/mock/tiandidistribute', python_executable: 'python3' },
+    config_warning: null,
     defaults: { template_mode: 'default', cover_repeat_window: 8 },
   },
 }

@@ -5,9 +5,12 @@ import csv
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -30,9 +33,12 @@ from tiandi_engine.runner.pipeline import run_platform_task, run_publish_pipelin
 
 BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
+CDP_RESOLVER_SCRIPT = BASE_DIR / "live_cdp_ws_resolver.mjs"
 WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
+BROWSER_SESSION_DIR = BASE_DIR / ".tiandidistribute" / "browser-session"
+BROWSER_SESSION_STATE_FILE = BROWSER_SESSION_DIR / "state.json"
 PUBLISH_RECORD_FIELDNAMES = [
     "timestamp",
     "article",
@@ -44,6 +50,9 @@ PUBLISH_RECORD_FIELDNAMES = [
     "cover_path",
     "status",
     "error_type",
+    "current_url",
+    "page_state",
+    "smoke_step",
     "returncode",
     "stdout",
     "stderr",
@@ -89,9 +98,16 @@ PLATFORM_MATCHES = {
     "jianshu": ["jianshu.com/writer"],
     "yidian": ["mp.yidianzixun.com"],
 }
+BROWSER_PLATFORM_LABELS = {
+    "zhihu": "知乎",
+    "toutiao": "头条号",
+    "jianshu": "简书",
+    "yidian": "一点号",
+}
 DEFAULT_PLATFORMS = ["wechat", "zhihu", "toutiao", "jianshu", "yidian"]
 BROWSER_PLATFORMS = list(PLATFORM_URLS.keys())
 COVER_PLATFORMS_SET = frozenset(COVER_PLATFORMS)
+MAX_RECORD_LOG_LENGTH = 4096
 
 
 def parse_platforms(raw_value):
@@ -162,43 +178,92 @@ def load_project_config():
     return {}
 
 
-def get_wechat_config_status():
-    env_file = BASE_DIR / "secrets.env"
-    file_values = load_simple_env_file(env_file)
-    config = load_project_config()
-    appid = os.environ.get("WECHAT_APPID") or file_values.get("WECHAT_APPID")
-    secret = os.environ.get("WECHAT_SECRET") or file_values.get("WECHAT_SECRET")
-    cover_files = sorted(COVERS_DIR.glob("cover_*.png"))
-    placeholder_markers = ("CHANGE_ME", "your_", "你的", "example", "appid_here")
-
-    def is_real(value):
-        if not value:
-            return False
-        upper_value = value.upper()
-        return not any(marker.upper() in upper_value for marker in placeholder_markers)
-
-    ai_key = (
-        config.get("secrets", {}).get("api_key")
-        or config.get("ai", {}).get("api_key")
-        or (os.environ.get("OPENROUTER_API_KEY") if config else None)
-    )
-    ai_base_url = config.get("settings", {}).get("base_url")
-    ai_model = config.get("settings", {}).get("model")
-    prefer_ai_first = config.get("cover", {}).get("prefer_ai_first", True)
-
-    return {
-        "env_file_exists": env_file.exists(),
-        "appid_ready": is_real(appid),
-        "secret_ready": is_real(secret),
-        "covers_ready": len(cover_files) >= 1,
-        "cover_count": len(cover_files),
-        "ai_cover_ready": prefer_ai_first and is_real(ai_key) and is_real(ai_base_url) and is_real(ai_model),
-    }
+def get_wechat_config_status(base_dir=None):
+    config = load_engine_config(base_dir or BASE_DIR, environ=os.environ)
+    status = config.get_wechat_config_status()
+    status["config_warning"] = config.project_config_warning
+    return status
 
 
 def get_page_text_snippet(target_id, limit=2000):
     expression = f"(() => (document.body.innerText || '').slice(0, {limit}))()"
     return run_cdp("eval", target_id, expression)
+
+
+def inspect_browser_platform_state(platform, target_id):
+    expressions = {
+        "zhihu": """
+(() => {
+  const href = location.href;
+  const text = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+  const titleEl = document.querySelector('textarea[placeholder*="标题"], input[placeholder*="标题"]');
+  const editor = document.querySelector('.public-DraftEditor-content, .ProseMirror, [data-lexical-editor="true"], [contenteditable="true"]');
+  if (titleEl && editor) {
+    return JSON.stringify({ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '写作编辑器已就绪' });
+  }
+  if (text.includes('登录') || text.includes('验证码')) {
+    return JSON.stringify({ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' });
+  }
+  if (!href.includes('/write') && !href.includes('/creator')) {
+    return JSON.stringify({ current_url: href, page_state: 'wrong_editor_page', editor_ready: false, detail: '当前标签页不在知乎写作页' });
+  }
+  return JSON.stringify({ current_url: href, page_state: 'editor_missing', editor_ready: false, detail: '已进入知乎域名，但未检测到标题框或正文编辑器' });
+})()
+""".strip(),
+        "toutiao": f"""
+(() => {{
+  const href = location.href;
+  const text = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+  const titleEl = document.querySelector('textarea[placeholder="请输入文章标题（2～30个字）"]');
+  const editor = document.querySelector('.ProseMirror');
+  if (titleEl && editor) {{
+    return JSON.stringify({{ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '图文编辑器已就绪' }});
+  }}
+  if (text.includes('登录') || text.includes('验证码')) {{
+    return JSON.stringify({{ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' }});
+  }}
+  if (!href.startsWith({json.dumps(PLATFORM_URLS["toutiao"])}) && !href.includes('/graphic/publish')) {{
+    return JSON.stringify({{ current_url: href, page_state: 'wrong_editor_page', editor_ready: false, detail: '当前标签页不在头条号图文写作页' }});
+  }}
+  return JSON.stringify({{ current_url: href, page_state: 'editor_missing', editor_ready: false, detail: '已进入头条号发文域，但未检测到标题框或正文编辑器' }});
+}})()
+""".strip(),
+        "yidian": """
+(() => {
+  const href = location.href;
+  const text = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+  const titleEl = document.querySelector("input.post-title");
+  const editor = document.querySelector(".editor-content[contenteditable='true']");
+  const canEnterEditor = !!document.querySelector('a.editor')
+    || Array.from(document.querySelectorAll('a,button')).some((el) => {
+      const value = (el.innerText || '').trim();
+      const href = el.getAttribute && (el.getAttribute('href') || '');
+      return value === '发文章' || value === '发布' || value === '再写一篇' || href === '#/Writing/articleEditor';
+    });
+  if (titleEl && editor) {
+    return JSON.stringify({ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '一点号编辑器已就绪' });
+  }
+  if (text.includes('登录') || text.includes('验证码')) {
+    return JSON.stringify({ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' });
+  }
+  if (canEnterEditor) {
+    return JSON.stringify({ current_url: href, page_state: 'need_enter_editor', editor_ready: false, detail: '当前仍停留在内容管理或审核中视图，请先点“发文章/再写一篇”进入编辑器' });
+  }
+  if (!href.includes('/Writing/articleEditor')) {
+    return JSON.stringify({ current_url: href, page_state: 'wrong_editor_page', editor_ready: false, detail: '当前标签页不在一点号发文编辑页' });
+  }
+  return JSON.stringify({ current_url: href, page_state: 'editor_missing', editor_ready: false, detail: '已进入一点号发文页，但未检测到标题框或正文编辑器' });
+})()
+""".strip(),
+    }
+    expression = expressions.get(platform)
+    if not expression:
+        return {"current_url": "", "page_state": "unsupported", "editor_ready": True, "detail": ""}
+    output = run_cdp("eval", target_id, expression, timeout=5)
+    payload = json.loads(output)
+    if not isinstance(payload, dict):
+        raise ValueError(f"预检返回格式异常: {payload!r}")
+    return payload
 
 
 def _safe_article_stem(path: Path) -> str:
@@ -289,20 +354,177 @@ def build_publish_context_resolver(article_paths: list[Path], platforms: list[st
     return context_resolver
 
 
-def run_preflight_checks(platforms, mode, workbench, base_dir=None, cover_dir_override=None):
+def describe_cdp_connection(payload):
+    if not payload:
+        return None
+    source = payload.get("source")
+    detail = payload.get("detail") or ""
+    if source == "managed_browser_port":
+        return detail or "当前 CDP 连接来源：Ordo 托管浏览器"
+    if source == "managed_browser_port_file":
+        return detail or "当前 CDP 连接来源：Ordo 托管浏览器资料目录"
+    if source == "env_browser_ws_url":
+        return "当前 CDP 连接来源：LIVE_CDP_BROWSER_WS_URL"
+    if source == "env_live_cdp_port":
+        return "当前 CDP 连接来源：LIVE_CDP_PORT"
+    if source == "default_port_9222":
+        return "当前 CDP 连接来源：默认调试端口 9222"
+    if source == "windows_devtools_port_file":
+        return f"当前 CDP 连接来源：{detail or 'LOCALAPPDATA/Google/Chrome/User Data/DevToolsActivePort'}"
+    if source == "windows_chromium_port_file":
+        return f"当前 CDP 连接来源：{detail or 'LOCALAPPDATA/Chromium/User Data/DevToolsActivePort'}"
+    if source == "macos_devtools_port_file":
+        return f"当前 CDP 连接来源：{detail or 'Library/Application Support/Google/Chrome/DevToolsActivePort'}"
+    if source == "linux_devtools_port_file":
+        return f"当前 CDP 连接来源：{detail or '~/.config/google-chrome/DevToolsActivePort'}"
+    return f"当前 CDP 连接来源：{detail or source or '远程调试 Chrome'}"
+
+
+def load_browser_session_settings(base_dir=None, environ=None):
+    root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
+    env = dict(os.environ if environ is None else environ)
+    return load_engine_config(root, environ=env).get_browser_session_settings()
+
+
+def get_cdp_runtime_env(*, base_dir=None, environ=None):
+    env = dict(os.environ if environ is None else environ)
+    settings = load_browser_session_settings(base_dir=base_dir, environ=env)
+    if settings.get("enabled"):
+        env["LIVE_CDP_PORT"] = str(settings["debug_port"])
+        env["ORDO_BROWSER_SESSION_DEBUG_PORT"] = str(settings["debug_port"])
+        env["ORDO_BROWSER_SESSION_PROFILE_DIR"] = str(settings["profile_dir"])
+    return env
+
+
+def _now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _browser_session_state_path(base_dir=None):
+    root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
+    return root / ".tiandidistribute" / "browser-session" / "state.json"
+
+
+def load_browser_session_state(base_dir=None):
+    path = _browser_session_state_path(base_dir)
+    settings = load_browser_session_settings(base_dir=base_dir)
+    payload = {
+        "mode": "managed" if settings.get("enabled") else "fallback_system_browser",
+        "updated_at": None,
+        "last_checked_at": None,
+        "platforms": {},
+    }
+    if not path.exists():
+        return payload
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return payload
+    if isinstance(raw, dict):
+        payload.update({key: raw.get(key) for key in ("mode", "updated_at", "last_checked_at") if key in raw})
+        if isinstance(raw.get("platforms"), dict):
+            payload["platforms"] = raw["platforms"]
+    return payload
+
+
+def save_browser_session_state(base_dir, payload):
+    path = _browser_session_state_path(base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_browser_session_mode(cdp_connection=None, base_dir=None):
+    source = (cdp_connection or {}).get("source")
+    if isinstance(source, str) and source.startswith("managed_browser"):
+        return "managed"
+    settings = load_browser_session_settings(base_dir=base_dir)
+    return "fallback_system_browser" if settings.get("enabled") else "system_browser"
+
+
+def _browser_session_requires_login(state):
+    page_state = str(state.get("page_state") or "").lower()
+    current_url = str(state.get("current_url") or "").lower()
+    detail = str(state.get("detail") or "").lower()
+    markers = ("login", "signin", "passport", "验证码", "登录")
+    return (
+        page_state in {"login_required", "expired_or_relogin_required", "captcha_required"}
+        or any(marker in current_url for marker in ("login", "signin", "passport"))
+        or any(marker.lower() in detail for marker in markers)
+    )
+
+
+def persist_browser_session_health(base_dir, platform, state, *, cdp_connection=None):
+    payload = load_browser_session_state(base_dir)
+    now = _now_iso()
+    payload["mode"] = resolve_browser_session_mode(cdp_connection=cdp_connection, base_dir=base_dir)
+    payload["updated_at"] = now
+    payload["last_checked_at"] = now
+    platforms = dict(payload.get("platforms") or {})
+    platform_state = dict(platforms.get(platform) or {})
+    platform_state["last_checked_at"] = now
+    platform_state["current_url"] = str(state.get("current_url") or "")
+    platform_state["page_state"] = str(state.get("page_state") or "")
+    if _browser_session_requires_login(state):
+        platform_state["status"] = "expired_or_relogin_required"
+        platform_state["last_relogin_required_at"] = now
+    elif state.get("editor_ready"):
+        platform_state["status"] = "healthy"
+        platform_state["last_healthy_at"] = now
+    else:
+        platform_state["status"] = str(platform_state.get("status") or "healthy")
+    platforms[platform] = platform_state
+    payload["platforms"] = platforms
+    save_browser_session_state(base_dir, payload)
+    return platform_state
+
+
+def get_cdp_connection_metadata(base_dir=None):
+    try:
+        output = subprocess.run(
+            ["node", str(CDP_RESOLVER_SCRIPT), "--json"],
+            cwd=str(BASE_DIR),
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=15,
+            env=get_cdp_runtime_env(base_dir=base_dir),
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    if not output:
+        return None
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    detail = describe_cdp_connection(payload)
+    if detail:
+        return {"source": payload.get("source"), "detail": detail}
+    return None
+
+
+def run_preflight_checks(platforms, mode, workbench, base_dir=None, cover_dir_override=None, cdp_connection=None):
     blockers = []
     warnings = []
     root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
     override = Path(cover_dir_override).resolve() if cover_dir_override is not None else None
 
     if "wechat" in platforms:
-        wechat = get_wechat_config_status()
+        wechat = get_wechat_config_status(root)
         if not wechat["appid_ready"] or not wechat["secret_ready"]:
             blockers.append("微信公众号缺少 `WECHAT_APPID` 或 `WECHAT_SECRET`，请先配置 `secrets.env`")
         if not wechat["covers_ready"] and not wechat["ai_cover_ready"]:
             blockers.append("微信公众号缺少可用封面：请配置 AI 封面所需的 `config.json`，或准备 `covers/cover_*.png`")
         elif not wechat["covers_ready"] and wechat["ai_cover_ready"]:
             warnings.append("未检测到本地默认封面，当前将默认优先使用 AI 封面生成能力")
+        if wechat.get("config_warning"):
+            warnings.append(str(wechat["config_warning"]))
+    else:
+        config = load_engine_config(root, environ=os.environ)
+        if config.project_config_warning:
+            warnings.append(config.project_config_warning)
 
     if mode == "publish" and "jianshu" in platforms:
         jianshu_target = workbench.get("jianshu")
@@ -314,9 +536,31 @@ def run_preflight_checks(platforms, mode, workbench, base_dir=None, cover_dir_ov
             except subprocess.CalledProcessError:
                 warnings.append("简书预检读取失败，发布时再做实际判断")
 
+    missing_browser_targets = []
     for platform in platforms:
         if platform in BROWSER_PLATFORMS and not workbench.get(platform):
+            missing_browser_targets.append(platform)
             blockers.append(f"未找到 `{platform}` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录")
+
+    for platform in platforms:
+        if platform in BROWSER_PLATFORMS and workbench.get(platform) and not missing_browser_targets:
+            label = BROWSER_PLATFORM_LABELS.get(platform, platform)
+            try:
+                state = inspect_browser_platform_state(platform, workbench[platform])
+            except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError):
+                warnings.append(f"{label}预检读取失败，发布时再做实际判断")
+            else:
+                persist_browser_session_health(root, platform, state, cdp_connection=cdp_connection)
+                if not state.get("editor_ready"):
+                    detail = state.get("detail") or "页面未进入可写编辑器态"
+                    current_url = state.get("current_url") or ""
+                    location_detail = f" 当前页面：{current_url}" if current_url else ""
+                    blockers.append(f"{label}预检未通过：{detail}.{location_detail}".strip())
+
+    if cdp_connection and any(platform in BROWSER_PLATFORMS for platform in platforms):
+        detail = cdp_connection.get("detail")
+        if detail:
+            warnings.append(detail)
 
     non_wechat_cover_platforms = [p for p in platforms if p in COVER_PLATFORMS_SET]
     if non_wechat_cover_platforms:
@@ -355,25 +599,59 @@ def classify_result(result):
 
 
 def _maybe_migrate_publish_records_csv(path: Path):
+    return _load_publish_record_rows(path)
+
+
+def _backup_publish_records(path: Path) -> Path:
+    backup = path.with_name(f"{path.name}.bak")
+    if backup.exists():
+        backup.unlink()
+    shutil.copyfile(path, backup)
+    return backup
+
+
+def _write_publish_records_rows(path: Path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fp:
+            writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES, extrasaction="ignore")
+            writer.writeheader()
+            for existing in rows:
+                writer.writerow({k: (existing.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES})
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _load_publish_record_rows(path: Path):
     if not path.exists() or path.stat().st_size == 0:
-        return
-    with path.open("r", encoding="utf-8", newline="") as fp:
-        reader = csv.DictReader(fp)
-        old_fn = list(reader.fieldnames or [])
-        rows = list(reader)
+        return []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fp:
+            reader = csv.DictReader(fp)
+            old_fn = list(reader.fieldnames or [])
+            rows = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        _backup_publish_records(path)
+        path.unlink(missing_ok=True)
+        return []
     if set(old_fn) == set(PUBLISH_RECORD_FIELDNAMES):
-        return
-    with path.open("w", encoding="utf-8", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES})
+        return [{k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES} for row in rows]
+    _backup_publish_records(path)
+    normalized_rows = [{k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES} for row in rows]
+    _write_publish_records_rows(path, normalized_rows)
+    return normalized_rows
 
 
 def append_publish_record(result):
     path = PUBLISH_RECORDS_FILE
-    _maybe_migrate_publish_records_csv(path)
-    had_rows = path.exists() and path.stat().st_size > 0
+    rows = _maybe_migrate_publish_records_csv(path)
     et = result.get("error_type")
     error_type_cell = et if et is not None and et != "" else ""
 
@@ -381,6 +659,12 @@ def append_publish_record(result):
         if val is None:
             return ""
         return str(val)
+
+    def _sanitize_record_log(value):
+        text = _cell(value).replace("\n", "\\n")
+        if len(text) <= MAX_RECORD_LOG_LENGTH:
+            return text
+        return text[: MAX_RECORD_LOG_LENGTH - len("...[truncated]")] + "...[truncated]"
 
     row = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -393,15 +677,15 @@ def append_publish_record(result):
         "cover_path": _cell(result.get("cover_path")),
         "status": result.get("status", ""),
         "error_type": error_type_cell,
+        "current_url": _cell(result.get("current_url")),
+        "page_state": _cell(result.get("page_state")),
+        "smoke_step": _cell(result.get("smoke_step")),
         "returncode": result["returncode"],
-        "stdout": result.get("stdout", "").replace("\n", "\\n"),
-        "stderr": result.get("stderr", "").replace("\n", "\\n"),
+        "stdout": _sanitize_record_log(result.get("stdout", "")),
+        "stderr": _sanitize_record_log(result.get("stderr", "")),
     }
-    with path.open("a", encoding="utf-8", newline="") as fp:
-        writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES, extrasaction="ignore")
-        if not had_rows:
-            writer.writeheader()
-        writer.writerow(row)
+    rows.append(row)
+    _write_publish_records_rows(path, rows)
 
 
 def print_result(result):
@@ -420,11 +704,14 @@ def print_result(result):
         "platform": result["platform"],
         "status": result.get("status"),
         "error_type": result.get("error_type"),
+        "current_url": result.get("current_url"),
+        "page_state": result.get("page_state"),
+        "smoke_step": result.get("smoke_step"),
     }
     print(f"[META] {json.dumps(meta, ensure_ascii=False)}")
 
 
-def run_cdp(*args):
+def run_cdp(*args, timeout=120, base_dir=None):
     command = ["node", str(CDP_SCRIPT), *args]
     return subprocess.run(
         command,
@@ -432,7 +719,8 @@ def run_cdp(*args):
         text=True,
         capture_output=True,
         check=True,
-        timeout=120,
+        timeout=timeout,
+        env=get_cdp_runtime_env(base_dir=base_dir),
     ).stdout.strip()
 
 
@@ -449,14 +737,28 @@ def save_workbench_targets(targets):
     )
 
 
-def iter_chrome_launch_commands(urls, platform=None):
+def iter_chrome_launch_commands(urls, platform=None, browser_session=None):
     launch_urls = list(urls or [])
     target_platform = (platform or sys.platform).lower()
+    session = browser_session or {}
+    extra_args = []
+    if session.get("enabled"):
+        extra_args = [
+            f"--user-data-dir={session['profile_dir']}",
+            f"--remote-debugging-port={session['debug_port']}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
     if target_platform == "darwin":
+        if extra_args:
+            return [
+                ["open", "-a", app_name, *launch_urls, "--args", *extra_args]
+                for app_name in CHROME_APP_CANDIDATES
+            ]
         return [["open", "-a", app_name, *launch_urls] for app_name in CHROME_APP_CANDIDATES]
     if target_platform.startswith("win"):
-        return [["cmd", "/c", "start", "", browser, *launch_urls] for browser in WINDOWS_CHROME_CANDIDATES]
-    return [[browser, *launch_urls] for browser in LINUX_CHROME_CANDIDATES]
+        return [["cmd", "/c", "start", "", browser, *extra_args, *launch_urls] for browser in WINDOWS_CHROME_CANDIDATES]
+    return [[browser, *extra_args, *launch_urls] for browser in LINUX_CHROME_CANDIDATES]
 
 
 def describe_chrome_launch_command(command):
@@ -467,9 +769,10 @@ def describe_chrome_launch_command(command):
     return command[0]
 
 
-def launch_chrome(urls):
+def launch_chrome(urls, base_dir=None):
     last_error = None
-    for command in iter_chrome_launch_commands(urls):
+    browser_session = load_browser_session_settings(base_dir=base_dir)
+    for command in iter_chrome_launch_commands(urls, browser_session=browser_session):
         app_name = describe_chrome_launch_command(command)
         try:
             subprocess.run(
@@ -487,24 +790,24 @@ def launch_chrome(urls):
     raise RuntimeError("无法自动启动浏览器")
 
 
-def list_tabs_or_none():
+def list_tabs_or_none(base_dir=None):
     try:
-        return list_tabs()
+        return list_tabs(base_dir=base_dir)
     except subprocess.CalledProcessError:
         return None
 
 
-def ensure_chrome_ready(platforms):
-    tabs = list_tabs_or_none()
+def ensure_chrome_ready(platforms, base_dir=None):
+    tabs = list_tabs_or_none(base_dir=base_dir)
     if tabs is not None:
         return tabs, None
 
     urls = [PLATFORM_URLS[platform] for platform in platforms]
-    app_name = launch_chrome(urls)
+    app_name = launch_chrome(urls, base_dir=base_dir)
 
     deadline = time.time() + 20
     while time.time() < deadline:
-        tabs = list_tabs_or_none()
+        tabs = list_tabs_or_none(base_dir=base_dir)
         if tabs is not None:
             return tabs, app_name
         time.sleep(1)
@@ -514,8 +817,8 @@ def ensure_chrome_ready(platforms):
     )
 
 
-def list_tabs():
-    output = run_cdp("list")
+def list_tabs(base_dir=None):
+    output = run_cdp("list", base_dir=base_dir)
     tabs = []
     for line in output.splitlines():
         parts = line.split("\t")
@@ -949,6 +1252,7 @@ def main():
 
     browser_platforms = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
     tabs = []
+    cdp_connection = None
     if browser_platforms:
         if args.no_auto_launch:
             tabs = list_tabs_or_none()
@@ -956,6 +1260,7 @@ def main():
             tabs, launched_app = ensure_chrome_ready(browser_platforms)
             if launched_app:
                 print(f"[INFO] 已自动启动浏览器: {launched_app}")
+        cdp_connection = get_cdp_connection_metadata()
 
         if not tabs:
             raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开 Chrome 并启用远程调试")
@@ -980,7 +1285,7 @@ def main():
         if warmed:
             print(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
 
-    blockers, warnings = run_preflight_checks(platforms, args.mode, workbench)
+    blockers, warnings = run_preflight_checks(platforms, args.mode, workbench, cdp_connection=cdp_connection)
     for warning in warnings:
         print(f"[WARN] {warning}")
     for blocker in blockers:

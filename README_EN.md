@@ -15,7 +15,7 @@ Compatibility note: some internal paths and cache directories still use `.tiandi
 - One Markdown source for multiple platforms
 - A full WeChat theme system with local preview and gallery mode
 - AI cover generation is enabled by default when configured
-- Browser platforms reuse the same logged-in Chrome workbench
+- Browser platforms now default to an Ordo-managed browser session: log in once, then keep reusing it with expiry reminders
 - Comment auto-reply stays as an independent tool instead of polluting the main publishing flow
 - The repository has been cleaned for public release: no real keys, no personal paths, no local scheduler setup
 
@@ -55,6 +55,27 @@ python3 -m pip install -r requirements.txt
 You also need Chrome or Chromium for browser-platform publishing.
 
 ## Configuration
+
+### Browser managed session
+
+By default, Ordo now prefers its managed browser session:
+
+- profile directory: `.tiandidistribute/browser-session/profile`
+- fixed debugging port: `9333`
+- session state file: `.tiandidistribute/browser-session/state.json`
+
+You can override it in `config.json`:
+
+```json
+{
+  "browser_session": {
+    "enabled": true,
+    "remind_after_days": 5,
+    "profile_dir": ".tiandidistribute/browser-session/profile",
+    "debug_port": 9333
+  }
+}
+```
 
 ### 1. Main WeChat publishing flow
 
@@ -133,7 +154,11 @@ Current desktop workbench coverage:
 - `continue_on_error` passed through to publish planning
 - retry-only-failed-items flow after a failed run, even when the failed item itself is not marked `retryable`
 - last-plan and last-result snapshots, so the desktop workbench can restore the latest task or latest failed subset after restart
+- restore buttons are disabled with an explicit prompt when the staged Markdown files from the latest plan are missing
+- the header now shows the effective `Repo Root` and `Python` path, making `ORDO_REPO_ROOT` / `ORDO_PYTHON` diagnosis much more direct
 - structured result details and recent history refresh after publishing, with clearer hints for login loss, environment issues, and page-structure changes
+- broken `config.json` is now surfaced as an explicit warning in the desktop workbench and CLI preflight, instead of silently degrading
+- the header now shows both WeChat status and browser-session status, including managed mode, fallback mode, expiring-soon reminders, and relogin-required state
 
 Cover-pool note:
 
@@ -206,9 +231,10 @@ python3 reply_comments.py --dry-run
 
 Recommended workflow:
 
-1. Open one remote-debugging-enabled Chrome instance
-2. Log in to Zhihu, Toutiao, Jianshu, and Yidian in that same instance
-3. Start with `--mode draft`
+1. On first use, let Ordo launch its managed browser session, or open the same managed profile yourself
+2. Log in to Zhihu, Toutiao, Jianshu, and Yidian in that managed session
+3. Reuse that same profile afterward instead of re-authorizing each run
+4. Start with `--mode draft`
 4. Then switch to `--mode publish`
 
 The main entry tries to:
@@ -219,16 +245,35 @@ The main entry tries to:
 - reuse the same bound targets
 - run preflight checks before publishing
 - assign covers for **non-WeChat** browser platforms from a local cover pool (separate from WeChat’s `covers/cover_*.png` / AI cover behavior; see `tiandi_engine` config)
+- prefer the Ordo-managed browser instance first, then fall back to existing system Chrome / `DevToolsActivePort` hints if needed
+
+Managed browser-session notes:
+
+- the first login still happens in the managed browser profile, but that profile is then reused by default
+- the latest health-check timestamps are stored in `.tiandidistribute/browser-session/state.json`
+- if the session has not been revalidated for a while, the desktop workbench shows an expiring-soon reminder
+- if preflight already lands on a login or verification page, the workbench explicitly tells you to log in again
 
 The desktop workbench now also shows explicit execution-area hints for:
 
 - Chrome remote debugging being required for browser platforms
 - existing platform login sessions being required
+- whether the current tab is already sitting on a writable editor page
 - DOM-dependent browser automation still being vulnerable to site changes
+- `config.json` parse failures
+
+### Browser Smoke Checklist
+
+The minimal smoke checklist and this round's validation record live at:
+
+- `docs/manual-validation/2026-03-28-browser-smoke.md`
+- `docs/manual-validation/2026-03-28-browser-session.md`
+
+Latest real smoke entry-point attempt: `2026-03-28`, blocked before site-level draft save because no remote-debuggable Chrome tabs were available in the current environment.
 
 ### Structured results for GUI consumers
 
-After each platform step, the CLI prints one JSON line prefixed with `[META]`, containing: `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, and `error_type`. A future desktop GUI or automation can parse this without scraping unstructured logs.
+After each platform step, the CLI prints one JSON line prefixed with `[META]`, containing: `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, `error_type`, `current_url`, `page_state`, and `smoke_step`. A future desktop GUI or automation can parse this without scraping unstructured logs.
 
 `publish_records.csv` includes the same columns. If you still have an older 8-column file, the first append under the new logic **migrates** the file to the wider schema (back up the CSV before upgrading).
 
@@ -243,6 +288,7 @@ After each platform step, the CLI prints one JSON line prefixed with `[META]`, c
 - Production Windows distribution: basic browser launch fallback exists now, but installer/signing/distribution work is still pending
 - Product-grade resume: the current flow is a minimal loop built from latest plan/result snapshots plus failed-item retry, not a full checkpoint-resume system
 - Secret and local-data hardening: `secrets.env`, `config.json`, and `publish_records.csv` are still local engineering-style storage and need a dedicated security pass before wider distribution
+- Real external smoke on logged-in accounts: the repository now includes a checklist plus one blocked real entry-point attempt, but a true authenticated draft-save pass still needs to be completed in the user's own browser environment
 
 ## Useful CDP Commands
 
