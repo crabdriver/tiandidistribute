@@ -1,11 +1,14 @@
 import uuid
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
+from xml.etree import ElementTree
+import zipfile
 
 from . import normalize
 from tiandi_engine.models.workbench import ArticleDraft
 
 _SUPPORTED_SUFFIXES = {".md", ".txt", ".docx"}
+_WORD_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 
 
 class DocxImportNotAvailableError(RuntimeError):
@@ -64,11 +67,57 @@ def _draft_from_txt_content(
     )
 
 
+def _extract_docx_blocks(path: Path) -> tuple[str, tuple[str, ...]]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml")
+    except (FileNotFoundError, KeyError, zipfile.BadZipFile) as exc:
+        raise UnsupportedSourceError(f"invalid docx file: {path}") from exc
+
+    root = ElementTree.fromstring(document_xml)
+    title = ""
+    blocks: list[str] = []
+    for paragraph in root.findall(".//w:body/w:p", _WORD_NS):
+        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", _WORD_NS)).strip()
+        if not text:
+            continue
+        style = paragraph.find("./w:pPr/w:pStyle", _WORD_NS)
+        style_value = style.attrib.get(f"{{{_WORD_NS['w']}}}val", "") if style is not None else ""
+        is_title = style_value in {"Title", "title", "Heading1", "heading1"}
+        is_list = paragraph.find("./w:pPr/w:numPr", _WORD_NS) is not None or style_value.lower().startswith("list")
+        if is_title and not title:
+            title = text
+            continue
+        blocks.append(f"- {text}" if is_list else text)
+
+    if not title and blocks:
+        title = blocks[0].removeprefix("- ").strip()
+        blocks = blocks[1:]
+    return title or path.stem, tuple(blocks)
+
+
+def _draft_from_docx(path: Path, *, article_id: str) -> ArticleDraft:
+    title, blocks = _extract_docx_blocks(path)
+    body_markdown = "\n\n".join(blocks)
+    return ArticleDraft(
+        article_id=article_id,
+        title=title,
+        body_markdown=body_markdown,
+        source_path=path,
+        source_kind="docx",
+        image_paths=(),
+        word_count=_word_count(body_markdown),
+        template_mode="default",
+        theme_name=None,
+        is_config_complete=False,
+    )
+
+
 def import_file(path: Path) -> ArticleDraft:
     path = Path(path).resolve()
     suffix = path.suffix.lower()
     if suffix == ".docx":
-        raise DocxImportNotAvailableError()
+        return _draft_from_docx(path, article_id=_new_article_id())
     if suffix not in (".md", ".txt"):
         raise UnsupportedSourceError(f"unsupported file type: {suffix!r} ({path})")
 

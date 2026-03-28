@@ -64,6 +64,12 @@ export interface WechatSettingsPayload extends WechatSettings {
   status: WechatConfigStatus
 }
 
+export interface BrowserRequirements {
+  browser_platforms: Platform[]
+  remote_debugging_required: boolean
+  login_required_platforms: Platform[]
+}
+
 export interface BridgeResources {
   theme_pool: ThemePool
   cover_pool: CoverPool
@@ -71,6 +77,7 @@ export interface BridgeResources {
     settings: WechatSettings
     status: WechatConfigStatus
   }
+  browser: BrowserRequirements
   defaults: {
     template_mode: string
     cover_repeat_window: number
@@ -144,6 +151,8 @@ export interface PublishResult {
 export interface HistoryPayload {
   records: Array<Record<string, string>>
   session: Record<string, unknown> | null
+  last_plan: PublishPlan | null
+  last_result: PublishResult | null
 }
 
 export interface PublishEvent {

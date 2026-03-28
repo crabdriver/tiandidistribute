@@ -57,6 +57,19 @@ CHROME_APP_CANDIDATES = [
     "Google Chrome Dev",
     "Chromium",
 ]
+WINDOWS_CHROME_CANDIDATES = [
+    "chrome",
+    "chrome.exe",
+    "chromium",
+    "chromium-browser",
+]
+LINUX_CHROME_CANDIDATES = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+]
 PLATFORM_SCRIPTS = {
     "wechat": "wechat_publisher.py",
     "zhihu": "zhihu_publisher.py",
@@ -436,11 +449,28 @@ def save_workbench_targets(targets):
     )
 
 
+def iter_chrome_launch_commands(urls, platform=None):
+    launch_urls = list(urls or [])
+    target_platform = (platform or sys.platform).lower()
+    if target_platform == "darwin":
+        return [["open", "-a", app_name, *launch_urls] for app_name in CHROME_APP_CANDIDATES]
+    if target_platform.startswith("win"):
+        return [["cmd", "/c", "start", "", browser, *launch_urls] for browser in WINDOWS_CHROME_CANDIDATES]
+    return [[browser, *launch_urls] for browser in LINUX_CHROME_CANDIDATES]
+
+
+def describe_chrome_launch_command(command):
+    if len(command) >= 3 and command[:2] == ["open", "-a"]:
+        return command[2]
+    if len(command) >= 5 and command[:3] == ["cmd", "/c", "start"]:
+        return command[4]
+    return command[0]
+
+
 def launch_chrome(urls):
     last_error = None
-    for app_name in CHROME_APP_CANDIDATES:
-        command = ["open", "-a", app_name]
-        command.extend(urls or [])
+    for command in iter_chrome_launch_commands(urls):
+        app_name = describe_chrome_launch_command(command)
         try:
             subprocess.run(
                 command,

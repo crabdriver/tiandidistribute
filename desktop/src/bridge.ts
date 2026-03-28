@@ -68,6 +68,11 @@ function mockResources(): BridgeResources {
       },
       status: mockWechatSettings.status,
     },
+    browser: {
+      browser_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+      remote_debugging_required: true,
+      login_required_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+    },
     defaults: {
       template_mode: 'default',
       cover_repeat_window: 8,
@@ -96,7 +101,7 @@ async function mockBridgeRequest<T>(payload: Record<string, unknown>): Promise<T
     return mockWechatSettings as T
   }
   if (command === 'read_recent_history') {
-    return { records: [], session: null } as T
+    return { records: [], session: null, last_plan: null, last_result: null } as T
   }
   if (command === 'import_sources') {
     const pastedText = String(payload.pasted_text ?? '')

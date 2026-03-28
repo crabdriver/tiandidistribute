@@ -25,7 +25,7 @@ import type {
   WechatConfigStatus,
 } from './types'
 import { describeCoverPoolStatus } from './coverStatus'
-import { buildRetryPlanFromFailures, hasRetryableFailures, listFailedResults } from './recovery'
+import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
 import { buildWechatBlockingMessage, describeWechatStatus } from './wechatStatus'
 import { buildResourceHints, describePublishResult } from './workbenchFeedback'
 
@@ -253,7 +253,7 @@ async function replanPublishJob() {
 }
 
 function handleRetryFailedPublish() {
-  if (!state.plan || !state.publishResult || !hasRetryableFailures(state.publishResult)) {
+  if (!state.plan || !state.publishResult || !hasFailedResults(state.publishResult)) {
     return
   }
   state.plan = buildRetryPlanFromFailures(state.plan, state.publishResult)
@@ -301,6 +301,51 @@ function applyImportedJob(job: ImportJob, resources: BridgeResources) {
   state.manualThemeByArticle = {}
   state.manualCoverByArticlePlatform = {}
   updateStatus(`已导入 ${job.article_count} 篇内容，等待模板与封面确认。`)
+}
+
+function restorePlanFromHistory(failuresOnly: boolean) {
+  const lastPlan = state.history?.last_plan
+  if (!lastPlan) {
+    return
+  }
+  const lastResult = state.history?.last_result ?? null
+  const nextPlan = failuresOnly && lastResult ? buildRetryPlanFromFailures(lastPlan, lastResult) : lastPlan
+
+  state.importJob = {
+    job_id: `restore-${nextPlan.publish_job.job_id}`,
+    import_mode: 'restore',
+    source_path: null,
+    pasted_preview: null,
+    imported_at: new Date().toISOString(),
+    article_count: nextPlan.drafts.length,
+    drafts: nextPlan.drafts,
+  }
+  state.resources = nextPlan.resources
+  state.drafts = nextPlan.drafts
+  state.selectedArticleId = nextPlan.drafts[0]?.article_id ?? null
+  state.publishMode = nextPlan.mode
+  state.continueOnError = nextPlan.continue_on_error
+  state.templateMode = nextPlan.drafts[0]?.template_mode ?? nextPlan.resources.defaults.template_mode
+  state.plan = nextPlan
+  state.publishResult = lastResult
+  state.logs = []
+  state.error = null
+  state.manualThemeByArticle = Object.fromEntries(
+    nextPlan.template_assignments
+      .filter((item) => item.is_manual_override && item.theme_id)
+      .map((item) => [item.article_id, item.theme_id as string]),
+  )
+  state.manualCoverByArticlePlatform = Object.fromEntries(
+    nextPlan.cover_assignments
+      .filter((item) => item.is_manual_override && item.cover_path)
+      .map((item) => [`${item.article_id}:${item.platform}`, item.cover_path as string]),
+  )
+  logLine(failuresOnly ? '已恢复上次失败项续跑计划' : '已恢复上次任务计划')
+  updateStatus(
+    failuresOnly
+      ? `已恢复上次失败项：${nextPlan.publish_job.article_ids.length} 篇文章 / ${nextPlan.publish_job.platforms.length} 个平台。`
+      : `已恢复上次任务：${nextPlan.publish_job.article_ids.length} 篇文章 / ${nextPlan.publish_job.platforms.length} 个平台。`,
+  )
 }
 
 async function handleFileImport() {
@@ -432,10 +477,42 @@ function renderArticleList() {
 
 function renderHistoryPanel() {
   const records = state.history?.records ?? []
-  if (records.length === 0) {
+  const lastPlan = state.history?.last_plan
+  const lastResult = state.history?.last_result
+  const sessionSummary = (state.history?.session?.summary as { total_articles?: number } | undefined) ?? null
+  const canRestoreFailures = Boolean(lastPlan && lastResult && hasFailedResults(lastResult))
+
+  if (!lastPlan && records.length === 0 && !sessionSummary) {
     return '<div class="empty-inline">最近结果会在这里显示。</div>'
   }
-  return records
+
+  const latestTask = lastPlan
+    ? `
+        <div class="history-item">
+          <strong>上次任务 ${escapeHtml(lastPlan.publish_job.job_id)}</strong>
+          <span>${lastPlan.publish_job.article_ids.length} 篇 / ${lastPlan.publish_job.platforms.length} 平台</span>
+          <span>${
+            lastResult
+              ? escapeHtml(`最近结果：成功 ${lastResult.publish_job.success_count}，失败 ${lastResult.publish_job.failure_count}`)
+              : escapeHtml(`控制台 session：${sessionSummary?.total_articles ?? 0} 篇`)
+          }</span>
+        </div>
+        <div class="publish-actions">
+          <button class="ghost-button" data-action="restore-latest-plan">恢复上次任务</button>
+          <button class="ghost-button" data-action="restore-failed-plan" ${canRestoreFailures ? '' : 'disabled'}>恢复失败项</button>
+        </div>
+      `
+    : sessionSummary
+      ? `
+          <div class="history-item">
+            <strong>最近 session</strong>
+            <span>${sessionSummary.total_articles ?? 0} 篇文章</span>
+            <span>可在重新导入后结合最近结果继续恢复。</span>
+          </div>
+        `
+      : ''
+
+  const recentRecords = records
     .map(
       (record) => `
         <div class="history-item">
@@ -446,6 +523,8 @@ function renderHistoryPanel() {
       `,
     )
     .join('')
+
+  return `${latestTask}${recentRecords}`
 }
 
 function renderTemplatePanel(article: ArticleDraft | null) {
@@ -562,7 +641,8 @@ function renderExecutionPanel() {
   const publishJob = state.plan?.publish_job
   const wechatBlock = buildWechatBlockingMessage(selectedPlatforms(), wechatStatus())
   const failedResults = listFailedResults(state.publishResult)
-  const canRetryFailures = Boolean(state.plan) && hasRetryableFailures(state.publishResult)
+  const canRetryFailures = Boolean(state.plan) && hasFailedResults(state.publishResult)
+  const hasDirectRetryHint = hasRetryableFailures(state.publishResult)
   const resourceHints = buildResourceHints(state.resources, selectedPlatforms())
   const disabled = state.drafts.length === 0 || state.busy === 'publish' || Boolean(wechatBlock)
   return `
@@ -606,7 +686,13 @@ function renderExecutionPanel() {
         failedResults.length
           ? `
             <div class="warn-banner">
-              最近一次发布有 ${failedResults.length} 个失败项。${canRetryFailures ? '可切换为失败项续跑。' : '当前失败项不支持自动续跑。'}
+              最近一次发布有 ${failedResults.length} 个失败项。${
+                canRetryFailures
+                  ? hasDirectRetryHint
+                    ? '可直接切换为失败项续跑。'
+                    : '可切换为失败项续跑，建议先检查登录态、页面环境或平台状态。'
+                  : '当前没有可恢复的失败项。'
+              }
             </div>
             <div class="result-list">
               ${failedResults
@@ -865,6 +951,12 @@ function bindEvents() {
           break
         case 'retry-failed-publish':
           handleRetryFailedPublish()
+          break
+        case 'restore-latest-plan':
+          restorePlanFromHistory(false)
+          break
+        case 'restore-failed-plan':
+          restorePlanFromHistory(true)
           break
         case 'select-article':
           state.selectedArticleId = element.dataset.articleId ?? null

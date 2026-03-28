@@ -126,13 +126,14 @@ Current desktop workbench coverage:
 
 - visual WeChat settings (`AppID` / `Secret` / `Author`)
 - top-level WeChat readiness status and blocking hint when credentials are missing
-- paste / single-file / folder import
+- paste / single-file / folder import, now covering `Markdown` / `TXT` / `DOCX`
 - theme-pool and cover-pool discovery
 - per-article theme override and non-WeChat cover override
 - Python bridge planning and streaming publish execution
 - `continue_on_error` passed through to publish planning
-- retry-only-failed-items flow after a failed run
-- structured result details and recent history refresh after publishing
+- retry-only-failed-items flow after a failed run, even when the failed item itself is not marked `retryable`
+- last-plan and last-result snapshots, so the desktop workbench can restore the latest task or latest failed subset after restart
+- structured result details and recent history refresh after publishing, with clearer hints for login loss, environment issues, and page-structure changes
 
 Cover-pool note:
 
@@ -162,6 +163,7 @@ Notes:
 
 - the current bundle is best treated as a developer preview, not a fully standalone installer with an embedded Python engine
 - `ORDO_REPO_ROOT` lets the desktop shell find `scripts/workbench_bridge.py` outside the original source launch layout
+- if repository-root or Python resolution fails, the desktop shell now tells you how to set `ORDO_REPO_ROOT` / `ORDO_PYTHON`
 - `tauri.conf.json` is still oriented toward `.app`-level output; Windows installer packaging remains a later step
 
 Preview a WeChat article locally:
@@ -218,6 +220,12 @@ The main entry tries to:
 - run preflight checks before publishing
 - assign covers for **non-WeChat** browser platforms from a local cover pool (separate from WeChat’s `covers/cover_*.png` / AI cover behavior; see `tiandi_engine` config)
 
+The desktop workbench now also shows explicit execution-area hints for:
+
+- Chrome remote debugging being required for browser platforms
+- existing platform login sessions being required
+- DOM-dependent browser automation still being vulnerable to site changes
+
 ### Structured results for GUI consumers
 
 After each platform step, the CLI prints one JSON line prefixed with `[META]`, containing: `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, and `error_type`. A future desktop GUI or automation can parse this without scraping unstructured logs.
@@ -228,6 +236,13 @@ After each platform step, the CLI prints one JSON line prefixed with `[META]`, c
 
 - **Zhihu, Toutiao, Yidian**: publisher scripts accept a cover path from the engine and attempt custom cover upload (DOM-dependent; site changes may break it).
 - **Jianshu**: the editor is restrictive; when custom cover cannot be applied, the flow fails with an **explicit diagnostic**—do not read this as full Jianshu custom-cover support.
+
+## Not Done Yet
+
+- Standalone installer: the desktop bundle still depends on a local Python runtime and engine checkout
+- Production Windows distribution: basic browser launch fallback exists now, but installer/signing/distribution work is still pending
+- Product-grade resume: the current flow is a minimal loop built from latest plan/result snapshots plus failed-item retry, not a full checkpoint-resume system
+- Secret and local-data hardening: `secrets.env`, `config.json`, and `publish_records.csv` are still local engineering-style storage and need a dedicated security pass before wider distribution
 
 ## Useful CDP Commands
 

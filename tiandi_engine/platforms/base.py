@@ -19,6 +19,13 @@ LIMIT_MARKERS = [
     "时间限制",
     "排期",
 ]
+ENVIRONMENT_MARKERS = [
+    "无法连接 CDP",
+    "远程调试",
+    "browser not reachable",
+    "chrome not reachable",
+    "无法自动启动浏览器",
+]
 
 
 def classify_process_result(platform, mode, process_result):
@@ -71,6 +78,8 @@ def infer_error_type(status, process_result):
         return ErrorType.DUPLICATE_OR_SKIPPED
     if process_result.get("timed_out"):
         return ErrorType.TRANSIENT_ERROR
+    if any(marker in output for marker in ENVIRONMENT_MARKERS):
+        return ErrorType.ENVIRONMENT_ERROR
     if "登录" in output:
         return ErrorType.LOGIN_REQUIRED
     if "未就绪" in output or "not found" in output:

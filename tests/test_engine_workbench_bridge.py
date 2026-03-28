@@ -100,6 +100,8 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(payload["theme_pool"]["entries"][0]["theme_id"], "night")
         self.assertTrue(payload["cover_pool"]["ok"])
         self.assertEqual(payload["cover_pool"]["count"], 1)
+        self.assertTrue(payload["browser"]["remote_debugging_required"])
+        self.assertIn("zhihu", payload["browser"]["browser_platforms"])
 
     def test_plan_publish_job_creates_assignments_and_staged_markdown(self):
         from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
@@ -295,6 +297,53 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(len(history["records"]), 1)
         self.assertEqual(history["records"][0]["platform"], "zhihu")
         self.assertEqual(history["session"]["summary"]["total_articles"], 1)
+
+    def test_read_recent_history_reads_last_workbench_plan_and_result(self):
+        from tiandi_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            (workbench_dir / "last-plan.json").write_text(
+                json.dumps(
+                    {
+                        "publish_job": {
+                            "job_id": "plan-1",
+                            "article_ids": ["a1"],
+                            "platforms": ["zhihu"],
+                            "status": "pending",
+                            "current_step": "",
+                            "success_count": 0,
+                            "failure_count": 0,
+                            "skip_count": 0,
+                            "recoverable": True,
+                            "error_summary": "",
+                        },
+                        "mode": "draft",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (workbench_dir / "last-result.json").write_text(
+                json.dumps(
+                    {
+                        "publish_job": {
+                            "job_id": "plan-1",
+                            "status": "failed",
+                            "article_ids": ["a1"],
+                            "platforms": ["zhihu"],
+                        },
+                        "results": [{"article_id": "a1", "platform": "zhihu", "status": "failed"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertEqual(history["last_plan"]["publish_job"]["job_id"], "plan-1")
+        self.assertEqual(history["last_result"]["publish_job"]["status"], "failed")
 
     def test_handle_bridge_command_routes_json_requests(self):
         from tiandi_engine.workbench.bridge import handle_bridge_command

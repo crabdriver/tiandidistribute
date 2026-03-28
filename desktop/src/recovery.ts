@@ -42,6 +42,13 @@ export function listFailedResults(result: PublishResult | null | undefined) {
   })
 }
 
+export function hasFailedResults(result: PublishResult | null | undefined): boolean {
+  if (!result || result.publish_job.failure_count <= 0) {
+    return false
+  }
+  return result.results.some((raw) => isFailedResult(raw))
+}
+
 export function hasRetryableFailures(result: PublishResult | null | undefined): boolean {
   if (!result || result.publish_job.failure_count <= 0) {
     return false

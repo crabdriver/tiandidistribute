@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { PublishPlan, PublishResult } from './types'
-import { buildRetryPlanFromFailures, hasRetryableFailures, listFailedResults } from './recovery'
+import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
 
 const basePlan: PublishPlan = {
   publish_job: {
@@ -90,6 +90,11 @@ const basePlan: PublishPlan = {
         ai_cover_ready: false,
       },
     },
+    browser: {
+      browser_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+      remote_debugging_required: true,
+      login_required_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+    },
     defaults: { template_mode: 'default', cover_repeat_window: 8 },
   },
 }
@@ -120,9 +125,32 @@ const failedResult: PublishResult = {
   ],
 }
 
+const nonRetryableFailedResult: PublishResult = {
+  publish_job: {
+    ...basePlan.publish_job,
+    failure_count: 1,
+    recoverable: false,
+  },
+  events: [],
+  results: [
+    {
+      article_id: 'a2',
+      platform: 'wechat',
+      status: 'failed',
+      returncode: 1,
+      retryable: false,
+      summary: 'login required',
+    },
+  ],
+}
+
 describe('publish recovery helpers', () => {
   it('detects retryable failed results', () => {
     expect(hasRetryableFailures(failedResult)).toBe(true)
+  })
+
+  it('detects failed results even when retryable is false', () => {
+    expect(hasFailedResults(nonRetryableFailedResult)).toBe(true)
   })
 
   it('builds a retry plan containing only failed article-platform pairs', () => {

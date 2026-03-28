@@ -115,6 +115,36 @@ class PlatformContractTests(unittest.TestCase):
         self.assertEqual(result.error_type, ErrorType.TRANSIENT_ERROR)
         self.assertTrue(result.retryable)
 
+    def test_collect_result_marks_login_required_from_login_message(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        result = registry["zhihu"].collect_result(
+            {
+                "platform": "zhihu",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "请先登录知乎后继续",
+            },
+            mode="publish",
+        )
+
+        self.assertEqual(result.error_type, ErrorType.LOGIN_REQUIRED)
+        self.assertFalse(result.retryable)
+
+    def test_collect_result_marks_environment_error_when_cdp_not_ready(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        result = registry["toutiao"].collect_result(
+            {
+                "platform": "toutiao",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "无法连接 CDP，请先开启远程调试 Chrome",
+            },
+            mode="publish",
+        )
+
+        self.assertEqual(result.error_type, ErrorType.ENVIRONMENT_ERROR)
+        self.assertFalse(result.retryable)
+
 
 if __name__ == "__main__":
     unittest.main()

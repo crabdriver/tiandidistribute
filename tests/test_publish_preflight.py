@@ -215,5 +215,21 @@ class PublishPreflightTests(unittest.TestCase):
         self.assertIsNone(payload["error_type"])
 
 
+class ChromeLaunchTests(unittest.TestCase):
+    def test_iter_chrome_launch_commands_windows_uses_start_command(self):
+        commands = publish.iter_chrome_launch_commands(["https://example.com"], platform="win32")
+
+        self.assertGreaterEqual(len(commands), 1)
+        self.assertEqual(
+            commands[0],
+            ["cmd", "/c", "start", "", "chrome", "https://example.com"],
+        )
+
+    def test_iter_chrome_launch_commands_macos_keeps_open_a_behavior(self):
+        commands = publish.iter_chrome_launch_commands(["https://example.com"], platform="darwin")
+
+        self.assertEqual(commands[0], ["open", "-a", "Google Chrome", "https://example.com"])
+
+
 if __name__ == "__main__":
     unittest.main()

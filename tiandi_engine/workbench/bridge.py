@@ -16,10 +16,13 @@ from tiandi_engine.models.workbench import ArticleDraft, ImportJob, PublishJob
 from tiandi_engine.runner.pipeline import run_platform_task
 
 WORKBENCH_ROOT = Path(".tiandidistribute") / "workbench"
+LAST_PLAN_PATH = WORKBENCH_ROOT / "last-plan.json"
+LAST_RESULT_PATH = WORKBENCH_ROOT / "last-result.json"
 SESSION_PATH = Path(".tiandidistribute") / "publish-console" / "publish-console-session.json"
 RECORDS_PATH = Path("publish_records.csv")
 SUCCESS_STATUSES = {"published", "draft_only", "success_unknown"}
 SKIP_STATUSES = {"skipped_existing"}
+BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian")
 
 
 def _now_iso() -> str:
@@ -38,6 +41,17 @@ def _coerce_path(value) -> Optional[Path]:
     if value in (None, ""):
         return None
     return Path(value).expanduser().resolve()
+
+
+def _write_json_snapshot(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_json_snapshot(path: Path):
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _coerce_draft(raw) -> ArticleDraft:
@@ -231,6 +245,11 @@ def discover_resources(base_dir):
         "theme_pool": _theme_pool_payload(root),
         "cover_pool": config.discover_cover_pool(),
         "wechat": _wechat_settings_payload(root),
+        "browser": {
+            "browser_platforms": list(BROWSER_PLATFORMS),
+            "remote_debugging_required": True,
+            "login_required_platforms": list(BROWSER_PLATFORMS),
+        },
         "defaults": {
             "template_mode": config.get_default_template_mode(),
             "cover_repeat_window": config.get_cover_repeat_window(),
@@ -323,7 +342,7 @@ def plan_publish_job(
         platforms=selected_platforms,
         status="pending",
     )
-    return {
+    plan_payload = {
         "publish_job": publish_job.to_dict(),
         "mode": mode,
         "continue_on_error": bool(continue_on_error),
@@ -334,6 +353,11 @@ def plan_publish_job(
         "context_map": context_map,
         "resources": discover_resources(root),
     }
+    _write_json_snapshot(root / LAST_PLAN_PATH, plan_payload)
+    last_result_path = root / LAST_RESULT_PATH
+    if last_result_path.exists():
+        last_result_path.unlink()
+    return plan_payload
 
 
 def _build_context_lookup(plan_payload):
@@ -454,11 +478,13 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
             "result_count": len(results),
         }
     )
-    return {
+    payload = {
         "publish_job": publish_job,
         "events": events,
         "results": results,
     }
+    _write_json_snapshot(root / LAST_RESULT_PATH, payload)
+    return payload
 
 
 def read_recent_history(base_dir, *, limit: int = 20):
@@ -474,9 +500,13 @@ def read_recent_history(base_dir, *, limit: int = 20):
     session = None
     if session_path.exists():
         session = json.loads(session_path.read_text(encoding="utf-8"))
+    last_plan = _read_json_snapshot(root / LAST_PLAN_PATH)
+    last_result = _read_json_snapshot(root / LAST_RESULT_PATH)
     return {
         "records": records,
         "session": session,
+        "last_plan": last_plan,
+        "last_result": last_result,
     }
 
 

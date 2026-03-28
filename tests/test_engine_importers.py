@@ -1,14 +1,55 @@
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from tiandi_engine.importers.sources import (
-    DocxImportNotAvailableError,
     import_file,
     import_pasted_text,
     list_import_candidates,
 )
 from tiandi_engine.models.workbench import ArticleDraft, CoverAssignment, ImportJob, PublishJob, TemplateAssignment
+
+
+def write_minimal_docx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+""",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+""",
+        )
+        archive.writestr(
+            "word/document.xml",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Title"/></w:pPr>
+      <w:r><w:t>文档标题</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>第一段。</w:t></w:r></w:p>
+    <w:p>
+      <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+      <w:r><w:t>列表项一</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>第二段。</w:t></w:r></w:p>
+  </w:body>
+</w:document>
+""",
+        )
 
 
 class TestMarkdownImport(unittest.TestCase):
@@ -86,14 +127,19 @@ class TestPasteImport(unittest.TestCase):
         self.assertEqual(draft.word_count, len("正文甲乙。"))
 
 
-class TestDocxPlaceholder(unittest.TestCase):
-    def test_docx_import_raises_clear_error(self):
+class TestDocxImport(unittest.TestCase):
+    def test_docx_import_extracts_title_paragraphs_and_lists(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "x.docx"
-            path.write_bytes(b"not a real docx")
-            with self.assertRaises(DocxImportNotAvailableError) as ctx:
-                import_file(path)
-            self.assertIn("docx", str(ctx.exception).lower())
+            write_minimal_docx(path)
+            draft = import_file(path)
+
+        self.assertEqual(draft.source_kind, "docx")
+        self.assertEqual(draft.title, "文档标题")
+        self.assertIn("第一段。", draft.body_markdown)
+        self.assertIn("- 列表项一", draft.body_markdown)
+        self.assertIn("第二段。", draft.body_markdown)
+        self.assertGreater(draft.word_count, 0)
 
 
 class TestWorkbenchToDict(unittest.TestCase):

@@ -28,6 +28,11 @@ const resources: BridgeResources = {
       ai_cover_ready: false,
     },
   },
+  browser: {
+    browser_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+    remote_debugging_required: true,
+    login_required_platforms: ['zhihu', 'toutiao', 'jianshu', 'yidian'],
+  },
   defaults: {
     template_mode: 'default',
     cover_repeat_window: 8,
@@ -38,6 +43,8 @@ describe('workbench feedback helpers', () => {
   it('builds actionable resource hints for selected platforms', () => {
     expect(buildResourceHints(resources, ['wechat', 'zhihu'])).toEqual([
       '微信发布前请先在设置里填写 AppID 和 Secret。',
+      '浏览器平台发布前请先开启 Chrome 远程调试。',
+      '浏览器平台发布前请先确认对应平台账号已登录。',
       '非微信平台封面池未就绪，请把默认封面放到 /tmp/covers。',
     ])
   })
@@ -51,5 +58,27 @@ describe('workbench feedback helpers', () => {
         retryable: true,
       }),
     ).toContain('network timeout')
+  })
+
+  it('formats login and platform-changed failures with clearer guidance', () => {
+    expect(
+      describePublishResult({
+        platform: 'zhihu',
+        status: 'failed',
+        summary: '需要登录后继续',
+        error_type: 'login_required',
+        retryable: false,
+      }),
+    ).toContain('需要重新登录')
+
+    expect(
+      describePublishResult({
+        platform: 'toutiao',
+        status: 'failed',
+        summary: 'selector not found',
+        error_type: 'platform_changed',
+        retryable: false,
+      }),
+    ).toContain('页面结构可能已变更')
   })
 })

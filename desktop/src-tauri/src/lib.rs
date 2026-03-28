@@ -16,16 +16,29 @@ fn validate_repo_root(path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
+fn format_repo_root_error(path: &Path, err: String, explicit: bool) -> String {
+    if explicit {
+        format!(
+            "{err}。当前 ORDO_REPO_ROOT={}; 请把它指向包含 scripts/workbench_bridge.py 的仓库根目录。",
+            path.display()
+        )
+    } else {
+        format!(
+            "{err}。如果桌面壳不是从源码仓库目录启动，请设置 ORDO_REPO_ROOT=/path/to/tiandidistribute。"
+        )
+    }
+}
+
 fn resolve_repo_root_from(manifest_dir: PathBuf, explicit_root: Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(root) = explicit_root {
-        return validate_repo_root(root);
+        return validate_repo_root(root.clone()).map_err(|err| format_repo_root_error(&root, err, true));
     }
-    manifest_dir
+    let guessed_root = manifest_dir
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .ok_or_else(|| "无法推断仓库根目录".to_string())
-        .and_then(validate_repo_root)
+        .ok_or_else(|| "无法推断仓库根目录".to_string())?;
+    validate_repo_root(guessed_root.clone()).map_err(|err| format_repo_root_error(&guessed_root, err, false))
 }
 
 fn repo_root() -> Result<PathBuf, String> {
@@ -42,18 +55,30 @@ fn bridge_script_path() -> Result<PathBuf, String> {
     Ok(repo_root()?.join("scripts").join("workbench_bridge.py"))
 }
 
+fn format_python_spawn_error(binary: &str, err: &std::io::Error) -> String {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "启动 Python bridge 失败：未找到 Python 可执行文件 `{binary}`。请先安装 Python 3，或通过 ORDO_PYTHON 指定解释器路径。原始错误：{err}"
+        ),
+        _ => format!(
+            "启动 Python bridge 失败：无法执行 `{binary}`。如有需要可通过 ORDO_PYTHON 指定解释器路径。原始错误：{err}"
+        ),
+    }
+}
+
 fn run_bridge_once(payload: Value) -> Result<Value, String> {
     let root = repo_root()?;
     let script = bridge_script_path()?;
     let request = serde_json::to_vec(&payload).map_err(|err| err.to_string())?;
-    let mut child = Command::new(python_executable())
+    let python = python_executable();
+    let mut child = Command::new(&python)
         .arg(script)
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("启动 Python bridge 失败: {err}"))?;
+        .map_err(|err| format_python_spawn_error(&python, &err))?;
     child
         .stdin
         .as_mut()
@@ -88,14 +113,15 @@ fn run_publish_job_stream(window: Window, plan: Value) -> Result<Value, String> 
         "plan": plan,
     }))
     .map_err(|err| err.to_string())?;
-    let mut child = Command::new(python_executable())
+    let python = python_executable();
+    let mut child = Command::new(&python)
         .arg(script)
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("启动发布任务失败: {err}"))?;
+        .map_err(|err| format!("启动发布任务失败：{}", format_python_spawn_error(&python, &err)))?;
     child
         .stdin
         .as_mut()
@@ -170,7 +196,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_repo_root_from, validate_repo_root};
+    use super::{format_python_spawn_error, resolve_repo_root_from, validate_repo_root};
+    use std::io;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -211,5 +238,26 @@ mod tests {
         .expect("resolve repo root");
 
         assert_eq!(resolved, override_root);
+    }
+
+    #[test]
+    fn resolve_repo_root_error_mentions_ordo_repo_root_override() {
+        let err = resolve_repo_root_from(
+            PathBuf::from("/tmp/unused/desktop/src-tauri"),
+            Some(PathBuf::from("/tmp/missing-ordo-root")),
+        )
+        .expect_err("missing override root should fail");
+
+        assert!(err.contains("ORDO_REPO_ROOT"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn format_python_spawn_error_mentions_ordo_python_when_binary_missing() {
+        let err = format_python_spawn_error(
+            "missing-python",
+            &io::Error::new(io::ErrorKind::NotFound, "missing-python"),
+        );
+
+        assert!(err.contains("ORDO_PYTHON"), "unexpected error: {err}");
     }
 }
