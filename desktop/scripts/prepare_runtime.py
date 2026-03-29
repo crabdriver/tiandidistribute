@@ -27,6 +27,11 @@ DEFAULT_REQUIRED_SITE_PACKAGE_NAMES = {
     "requests",
     "soupsieve",
     "urllib3",
+    "docx",
+    "lxml",
+    "yaml",
+    "_yaml",
+    "typing_extensions.py",
 }
 
 
