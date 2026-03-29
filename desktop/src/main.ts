@@ -687,34 +687,31 @@ function renderExecutionPanel() {
           <h3>执行区</h3>
           <p>${publishJob ? `任务 ${publishJob.job_id}` : '还未生成发布任务'}</p>
         </div>
-        <div class="publish-actions">
-          <select id="publish-mode-select">
-            <option value="draft" ${state.publishMode === 'draft' ? 'selected' : ''}>存草稿</option>
-            <option value="publish" ${state.publishMode === 'publish' ? 'selected' : ''}>直接发布</option>
-          </select>
-          <select id="cover-mode-select">
-            <option value="auto" ${state.coverMode === 'auto' ? 'selected' : ''}>封面: 自动</option>
-            <option value="force_on" ${state.coverMode === 'force_on' ? 'selected' : ''}>封面: 强制开启</option>
-            <option value="force_off" ${state.coverMode === 'force_off' ? 'selected' : ''}>封面: 关闭</option>
-          </select>
-          <select id="ai-declaration-mode-select">
-            <option value="auto" ${state.aiDeclarationMode === 'auto' ? 'selected' : ''}>AI 声明: 自动</option>
-            <option value="force_on" ${state.aiDeclarationMode === 'force_on' ? 'selected' : ''}>AI 声明: 强制开启</option>
-            <option value="force_off" ${state.aiDeclarationMode === 'force_off' ? 'selected' : ''}>AI 声明: 关闭</option>
-          </select>
-          ${
-            showsToutiaoSchedule
-              ? `<input id="scheduled-publish-at-input" type="datetime-local" value="${state.scheduledPublishAt ?? ''}" title="头条号定时发布时间">`
-              : ''
-          }
-          <label class="switch-field">
-            <input id="continue-on-error-checkbox" type="checkbox" ${state.continueOnError ? 'checked' : ''}>
-            <span>遇错继续</span>
-          </label>
-          <button class="primary-button" data-action="start-publish" ${disabled ? 'disabled' : ''}>
-            ${state.busy === 'publish' ? '发布中…' : '开始发布'}
-          </button>
-        </div>
+      </div>
+      <div class="publish-actions">
+        <select id="publish-mode-select">
+          <option value="draft" ${state.publishMode === 'draft' ? 'selected' : ''}>存草稿</option>
+          <option value="publish" ${state.publishMode === 'publish' ? 'selected' : ''}>直接发布</option>
+        </select>
+        <select id="cover-mode-select">
+          <option value="auto" ${state.coverMode === 'auto' ? 'selected' : ''}>封面: 自动</option>
+          <option value="force_on" ${state.coverMode === 'force_on' ? 'selected' : ''}>封面: 强制开启</option>
+          <option value="force_off" ${state.coverMode === 'force_off' ? 'selected' : ''}>封面: 关闭</option>
+        </select>
+        <select id="ai-declaration-mode-select">
+          <option value="auto" ${state.aiDeclarationMode === 'auto' ? 'selected' : ''}>AI 声明: 自动</option>
+          <option value="force_on" ${state.aiDeclarationMode === 'force_on' ? 'selected' : ''}>AI 声明: 强制开启</option>
+          <option value="force_off" ${state.aiDeclarationMode === 'force_off' ? 'selected' : ''}>AI 声明: 关闭</option>
+        </select>
+        ${
+          showsToutiaoSchedule
+            ? `<input id="scheduled-publish-at-input" type="datetime-local" value="${state.scheduledPublishAt ?? ''}" title="头条号定时发布时间">`
+            : ''
+        }
+        <label class="switch-field">
+          <input id="continue-on-error-checkbox" type="checkbox" ${state.continueOnError ? 'checked' : ''}>
+          <span>遇错继续</span>
+        </label>
       </div>
       <div class="job-summary">
         <div><strong>${publishJob?.article_ids.length ?? 0}</strong><span>文章</span></div>
@@ -763,6 +760,9 @@ function renderExecutionPanel() {
           `
           : ''
       }
+      <button class="primary-button primary-button--large" data-action="start-publish" ${disabled ? 'disabled' : ''}>
+        ${state.busy === 'publish' ? '发布中…' : '开始发布'}
+      </button>
     </section>
   `
 }

@@ -126,15 +126,30 @@ button {
 }
 
 .primary-button {
-  background: var(--color-primary);
-  border-color: transparent;
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-hover) 100%);
   color: white;
-  font-weight: 600;
-  transition: background-color 0.2s ease;
+  border-radius: var(--radius-md);
+  border: none;
+  padding: 12px 24px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: opacity 0.2s ease, transform 0.1s ease;
 }
 
 .primary-button:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  opacity: 0.9;
+}
+
+.primary-button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.primary-button--large {
+  width: 100%;
+  font-size: 16px;
+  padding: 16px 24px;
+  border-radius: var(--radius-lg);
+  margin-top: 10px;
 }
 
 .ghost-button:hover:not(:disabled) {
