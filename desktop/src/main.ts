@@ -890,10 +890,12 @@ function render() {
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Ordo Desktop Workbench MVP</p>
-          <h1>导入 -> 配置 -> 发布 -> 回看</h1>
-          <p class="subtle">${TAURI_RUNTIME ? 'Tauri + Rust 壳已接入 Python 引擎' : '当前为浏览器 Mock 模式，便于预览界面结构'}</p>
+        <div class="topbar__brand">
+          <div class="logo-placeholder"></div>
+          <strong>Ordo Workbench</strong>
+        </div>
+        <div class="topbar__steps">
+          <span>Import</span> → <span>Configure</span> → <span>Publish</span> → <span>Review</span>
         </div>
         <div class="topbar__actions">
           <span class="status-chip ${wechatStatus().appid_ready && wechatStatus().secret_ready ? 'is-ready' : 'is-pending'}">

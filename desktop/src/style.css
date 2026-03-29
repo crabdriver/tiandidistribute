@@ -52,31 +52,36 @@ button {
 .topbar {
   display: flex;
   justify-content: space-between;
-  gap: 20px;
-  align-items: flex-start;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 20px;
-  padding: 22px 24px;
-  box-shadow: var(--shadow);
+  align-items: center;
+  padding: 16px 32px;
+  background: transparent;
 }
 
-.eyebrow {
-  margin: 0 0 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 12px;
-  color: var(--accent);
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 16px;
 }
 
-.topbar h1,
+.logo-placeholder {
+  width: 24px;
+  height: 24px;
+  background-color: var(--color-primary);
+  border-radius: 6px;
+}
+
+.topbar__steps {
+  font-size: 14px;
+  color: var(--color-text-subtle);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+
 .panel h3 {
   margin: 0;
-}
-
-.topbar h1 {
-  font-size: 30px;
-  line-height: 1.1;
 }
 
 .subtle,
