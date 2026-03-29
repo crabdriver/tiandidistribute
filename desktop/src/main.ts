@@ -29,7 +29,7 @@ import type {
 import { describeCoverPoolStatus } from './coverStatus'
 import { compactHistoryPayload, compactPublishResult } from './publishResultMemory'
 import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
-import { buildWechatBlockingMessage, describeWechatStatus } from './wechatStatus'
+import { buildWechatBlockingMessage } from './wechatStatus'
 import { buildResourceHints, describeBrowserSessionSummary, describePublishResult } from './workbenchFeedback'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
@@ -155,10 +155,6 @@ function wechatStatus(): WechatConfigStatus {
   return state.resources?.wechat.status ?? EMPTY_WECHAT_STATUS
 }
 
-function browserSessionSummary() {
-  return describeBrowserSessionSummary(state.resources)
-}
-
 function logLine(text: string) {
   state.logs = [...state.logs, text].slice(-120)
 }
@@ -166,6 +162,28 @@ function logLine(text: string) {
 function updateStatus(text: string) {
   state.status = text
   render()
+}
+
+function showToast(message: string, type: 'info' | 'warning' | 'success' | 'error' = 'info') {
+  let container = document.getElementById('toast-container')
+  if (!container) {
+    container = document.createElement('div')
+    container.id = 'toast-container'
+    document.body.appendChild(container)
+  }
+  const toast = document.createElement('div')
+  toast.className = `toast toast--${type}`
+  toast.textContent = message
+  container.appendChild(toast)
+
+  // Trigger reflow
+  void toast.offsetWidth
+  toast.classList.add('toast--visible')
+
+  setTimeout(() => {
+    toast.classList.remove('toast--visible')
+    setTimeout(() => toast.remove(), 300)
+  }, 3000)
 }
 
 async function refreshWorkbenchData() {
@@ -183,6 +201,19 @@ async function refreshWorkbenchData() {
     state.aiDeclarationMode = state.aiDeclarationMode || resources.defaults.ai_declaration_mode
     state.scheduledPublishAt = state.scheduledPublishAt || resources.defaults.scheduled_publish_at
     state.error = null
+    
+    // Show transient toasts for statuses
+    const wechat = resources.wechat.status
+    if (!wechat.appid_ready || !wechat.secret_ready) {
+      showToast('微信配置未完成', 'warning')
+    }
+    const session = describeBrowserSessionSummary(resources)
+    if (session.tone !== 'ready') {
+      showToast(session.text, session.tone === 'danger' ? 'error' : 'warning')
+    } else {
+      showToast(session.text, 'success')
+    }
+
     updateStatus(TAURI_RUNTIME ? '桌面桥已连接，等待导入内容。' : '当前在浏览器 Mock 模式下，可预览工作台结构。')
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
@@ -476,8 +507,7 @@ function renderArticleList() {
   if (state.drafts.length === 0) {
     return `
       <div class="empty-block">
-        <h3>导入文章</h3>
-        <p>支持粘贴、单文件和文件夹导入。若要一键发到微信，建议先在顶部设置里填好 AppID 和 Secret。</p>
+        <span class="empty-inline">尚未导入文章</span>
       </div>
     `
   }
@@ -559,7 +589,6 @@ function renderTemplatePanel(article: ArticleDraft | null) {
       <div class="panel__head">
         <div>
           <h3>模板配置</h3>
-          <p>导入后先做全局模板选择，再按文章覆盖。</p>
         </div>
         <button class="ghost-button" data-action="open-theme-modal">批量设置</button>
       </div>
@@ -606,7 +635,7 @@ function renderPreview(article: ArticleDraft | null) {
     return `
       <section class="panel panel--preview">
         <h3>正文预览</h3>
-        <div class="empty-inline">导入文章后可在这里查看规范化 Markdown。</div>
+        <div class="empty-inline">暂无预览</div>
       </section>
     `
   }
@@ -641,6 +670,7 @@ function renderCoverPanel(article: ArticleDraft | null) {
             <div class="platform-row">
               <label class="platform-toggle">
                 <input type="checkbox" data-platform-toggle="${platform}" ${state.platformSelection[platform] ? 'checked' : ''}>
+                <span class="platform-icon platform-icon--${platform}"></span>
                 <span>${PLATFORM_LABELS[platform]}</span>
               </label>
               ${
@@ -657,7 +687,7 @@ function renderCoverPanel(article: ArticleDraft | null) {
                         .join('')}
                     </select>
                   `
-                  : `<span class="platform-note">${platform === 'wechat' ? '微信走微信封面链路' : '当前平台本轮不走封面分配'}</span>`
+                  : `<span class="platform-note">${platform === 'wechat' ? '使用微信封面' : '无需封面'}</span>`
               }
             </div>
           `
@@ -685,7 +715,7 @@ function renderExecutionPanel() {
       <div class="panel__head">
         <div>
           <h3>执行区</h3>
-          <p>${publishJob ? `任务 ${publishJob.job_id}` : '还未生成发布任务'}</p>
+          ${publishJob ? `<p class="subtle">任务 ${publishJob.job_id}</p>` : ''}
         </div>
       </div>
       <div class="publish-actions">
@@ -904,7 +934,6 @@ function renderModal() {
 
 function render() {
   const article = selectedArticle()
-  const browserSession = browserSessionSummary()
   app.innerHTML = `
     <div class="shell">
       <header class="topbar">
@@ -916,12 +945,6 @@ function render() {
     <span>导入</span> → <span>配置</span> → <span>发布</span> → <span>回看</span>
   </div>
         <div class="topbar__actions">
-          <span class="status-chip ${wechatStatus().appid_ready && wechatStatus().secret_ready ? 'is-ready' : 'is-pending'}">
-            ${describeWechatStatus(wechatStatus())}
-          </span>
-          <span class="status-chip ${browserSession.tone === 'ready' ? 'is-ready' : browserSession.tone === 'danger' ? 'is-danger' : 'is-pending'}">
-            ${escapeHtml(browserSession.text)}
-          </span>
           <button class="ghost-button" data-action="open-settings-modal">设置</button>
           <button class="ghost-button" data-action="open-paste-modal">粘贴导入</button>
           <button class="ghost-button" data-action="import-file">单文件</button>
