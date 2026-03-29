@@ -352,18 +352,23 @@ textarea {
 }
 
 .platform-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 100px 1fr;
   gap: 12px;
+  align-items: center;
 }
 
 .platform-toggle {
   display: flex;
   gap: 8px;
   align-items: center;
-  white-space: nowrap;
-  min-width: 100px;
+  cursor: pointer;
+}
+
+.platform-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-main);
 }
 
 .platform-icon {
@@ -371,6 +376,7 @@ textarea {
   height: 16px;
   border-radius: 4px;
   display: inline-block;
+  flex-shrink: 0;
 }
 
 .platform-icon--wechat { background-color: #07C160; }
@@ -380,14 +386,11 @@ textarea {
 .platform-icon--yidian { background-color: #00B4FF; }
 
 .cover-select {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
 }
 
-.platform-note {
-  flex: 1;
-  text-align: right;
-  font-size: 12px;
+.platform-empty-slot {
+  display: block;
 }
 
 .job-summary {

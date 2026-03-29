@@ -30,7 +30,7 @@ import { describeCoverPoolStatus } from './coverStatus'
 import { compactHistoryPayload, compactPublishResult } from './publishResultMemory'
 import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
 import { buildWechatBlockingMessage } from './wechatStatus'
-import { buildResourceHints, describeBrowserSessionSummary, describePublishResult } from './workbenchFeedback'
+import { describeBrowserSessionSummary, describePublishResult } from './workbenchFeedback'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 
@@ -671,13 +671,13 @@ function renderCoverPanel(article: ArticleDraft | null) {
               <label class="platform-toggle">
                 <input type="checkbox" data-platform-toggle="${platform}" ${state.platformSelection[platform] ? 'checked' : ''}>
                 <span class="platform-icon platform-icon--${platform}"></span>
-                <span>${PLATFORM_LABELS[platform]}</span>
+                <span class="platform-name">${PLATFORM_LABELS[platform]}</span>
               </label>
               ${
                 COVER_CAPABLE_PLATFORMS.has(platform)
                   ? `
                     <select class="cover-select" data-cover-select="${platform}" ${!article || !coverPool?.ok || !selected.includes(platform) ? 'disabled' : ''}>
-                      <option value="">${coverPool?.ok ? '自动分配封面' : '封面池不可用'}</option>
+                      <option value="">${coverPool?.ok ? '自动分配封面' : '默认'}</option>
                       ${(coverPool?.paths ?? [])
                         .map(
                           (path) => `
@@ -687,7 +687,7 @@ function renderCoverPanel(article: ArticleDraft | null) {
                         .join('')}
                     </select>
                   `
-                  : `<span class="platform-note">${platform === 'wechat' ? '使用微信封面' : '无需封面'}</span>`
+                  : `<span class="platform-empty-slot"></span>`
               }
             </div>
           `
@@ -703,11 +703,6 @@ function renderExecutionPanel() {
   const failedResults = listFailedResults(state.publishResult)
   const canRetryFailures = Boolean(state.plan) && hasFailedResults(state.publishResult)
   const hasDirectRetryHint = hasRetryableFailures(state.publishResult)
-  const resourceHints = buildResourceHints(state.resources, selectedPlatforms(), {
-    coverMode: state.coverMode,
-    aiDeclarationMode: state.aiDeclarationMode,
-    scheduledPublishAt: state.publishMode === 'publish' ? state.scheduledPublishAt : null,
-  })
   const showsToutiaoSchedule = state.publishMode === 'publish' && selectedPlatforms().includes('toutiao')
   const disabled = state.drafts.length === 0 || state.busy === 'publish' || Boolean(wechatBlock)
   return `
@@ -750,15 +745,6 @@ function renderExecutionPanel() {
         <div><strong>${publishJob?.failure_count ?? 0}</strong><span>失败</span></div>
       </div>
       ${wechatBlock ? `<div class="warn-banner">${escapeHtml(wechatBlock)}</div>` : ''}
-      ${
-        resourceHints.length
-          ? `
-            <div class="hint-list">
-              ${resourceHints.map((item) => `<div class="hint-item">${escapeHtml(item)}</div>`).join('')}
-            </div>
-          `
-          : ''
-      }
       ${
         failedResults.length
           ? `
@@ -939,7 +925,7 @@ function render() {
       <header class="topbar">
         <div class="topbar__brand">
           <div class="logo-placeholder"></div>
-          <strong>Ordo Workbench</strong>
+          <strong>Ordo</strong>
         </div>
   <div class="topbar__steps">
     <span>导入</span> → <span>配置</span> → <span>发布</span> → <span>回看</span>
