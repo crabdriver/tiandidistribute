@@ -16,6 +16,7 @@ Compatibility note: some internal paths and cache directories still use `.tiandi
 - A full WeChat theme system with local preview and gallery mode
 - AI cover generation is enabled by default when configured
 - Browser platforms now default to an Ordo-managed browser session: log in once, then keep reusing it with expiry reminders
+- Browser-platform tasks can now explicitly choose `cover / AI declaration` mode: `auto` / `force_on` / `force_off`
 - Comment auto-reply stays as an independent tool instead of polluting the main publishing flow
 - The repository has been cleaned for public release: no real keys, no personal paths, no local scheduler setup
 
@@ -152,6 +153,7 @@ Current desktop workbench coverage:
 - per-article theme override and non-WeChat cover override
 - Python bridge planning and streaming publish execution
 - `continue_on_error` passed through to publish planning
+- task-level `cover / AI declaration` options passed into the Zhihu / Toutiao / Yidian scripts
 - retry-only-failed-items flow after a failed run, even when the failed item itself is not marked `retryable`
 - last-plan and last-result snapshots, so the desktop workbench can restore the latest task or latest failed subset after restart
 - restore buttons are disabled with an explicit prompt when the staged Markdown files from the latest plan are missing
@@ -165,6 +167,14 @@ Cover-pool note:
 - non-WeChat platforms read the default local cover pool from `covers/`
 - you can override that path with `assignment.cover_dir` in `config.json`
 - the desktop UI now shows an explicit target directory when the cover pool is missing or empty
+
+Publish-option note:
+
+- `Cover: auto` keeps the current platform-default behavior
+- `Cover: force_on` asks for usable cover resources as early as planning / preflight
+- `Cover: force_off` skips custom cover setup; Yidian may still fall back to the platform default cover in direct-publish mode, and the UI now says so explicitly
+- `AI declaration: force_off` skips declaration setup on Zhihu / Toutiao / Yidian
+- `AI declaration: force_on` keeps declaration as a required step and fails loudly when the site structure no longer matches
 
 ### Desktop Packaging Preview
 
@@ -236,6 +246,7 @@ Recommended workflow:
 3. Reuse that same profile afterward instead of re-authorizing each run
 4. Start with `--mode draft`
 4. Then switch to `--mode publish`
+5. Record real smoke results against `docs/manual-validation/2026-03-28-browser-smoke.md`
 
 The main entry tries to:
 
@@ -285,10 +296,11 @@ After each platform step, the CLI prints one JSON line prefixed with `[META]`, c
 ## Not Done Yet
 
 - Standalone installer: the desktop bundle still depends on a local Python runtime and engine checkout
-- Production Windows distribution: basic browser launch fallback exists now, but installer/signing/distribution work is still pending
+- Production Windows distribution: the current closing phase is explicitly `macOS` first; Windows browser adaptation, installer, signing, and distribution stay in a later phase
 - Product-grade resume: the current flow is a minimal loop built from latest plan/result snapshots plus failed-item retry, not a full checkpoint-resume system
 - Secret and local-data hardening: `secrets.env`, `config.json`, and `publish_records.csv` are still local engineering-style storage and need a dedicated security pass before wider distribution
 - Real external smoke on logged-in accounts: the repository now includes a checklist plus one blocked real entry-point attempt, but a true authenticated draft-save pass still needs to be completed in the user's own browser environment
+- Bundled browser runtime and UI redesign: both remain explicitly postponed; the current product line stays with managed system browsers and a small-footprint desktop shell
 
 ## Useful CDP Commands
 

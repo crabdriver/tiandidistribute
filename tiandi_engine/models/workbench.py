@@ -110,6 +110,7 @@ class PublishJob:
     skip_count: int = 0
     recoverable: bool = True
     error_summary: str = ""
+    scheduled_publish_at: Optional[str] = None
 
     def to_dict(self):
         return {
@@ -123,4 +124,5 @@ class PublishJob:
             "skip_count": self.skip_count,
             "recoverable": self.recoverable,
             "error_summary": self.error_summary,
+            "scheduled_publish_at": self.scheduled_publish_at,
         }

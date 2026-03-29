@@ -1,0 +1,208 @@
+import json
+import sys
+import unittest
+from unittest.mock import patch
+
+import toutiao_publisher
+import yidian_publisher
+import zhihu_publisher
+
+
+class BrowserPublisherBehaviorTests(unittest.TestCase):
+    def test_zhihu_ai_declaration_matches_live_copy(self):
+        self.assertEqual(
+            zhihu_publisher.normalize_ui_text(zhihu_publisher.ZHIHU_AI_DECLARATION),
+            zhihu_publisher.normalize_ui_text("包含 AI 辅助创作"),
+        )
+
+    def test_toutiao_wait_for_draft_saved_accepts_saving_signal(self):
+        with patch.object(toutiao_publisher, "wait_until", return_value=True) as mocked_wait:
+            self.assertTrue(toutiao_publisher.wait_for_draft_saved("target-1"))
+
+        args = mocked_wait.call_args.args
+        self.assertEqual(args[0], "target-1")
+        self.assertIn("草稿保存中", args[1])
+
+    def test_toutiao_wait_for_cover_upload_accepts_uploaded_signal(self):
+        with patch.object(toutiao_publisher, "wait_until", return_value=True) as mocked_wait:
+            self.assertTrue(toutiao_publisher.wait_for_cover_upload("target-1"))
+
+        args = mocked_wait.call_args.args
+        self.assertEqual(args[0], "target-1")
+        self.assertIn("已上传", args[1])
+
+    def test_toutiao_wait_for_scheduled_publish_accepts_schedule_signal(self):
+        with patch.object(toutiao_publisher, "wait_until", return_value=True) as mocked_wait:
+            self.assertTrue(toutiao_publisher.wait_for_scheduled_publish("target-1"))
+
+        args = mocked_wait.call_args.args
+        self.assertEqual(args[0], "target-1")
+        self.assertIn("已设置定时发布", args[1])
+
+    def test_toutiao_select_byte_option_targets_visible_select_options(self):
+        with patch.object(
+            toutiao_publisher,
+            "run_cdp",
+            side_effect=["clicked", "clicked"],
+        ) as mocked_run, patch.object(toutiao_publisher.time, "sleep", return_value=None):
+            result = toutiao_publisher.select_byte_option("target-1", ".hour-select", "10")
+
+        self.assertEqual(result, "clicked")
+        eval_expression = mocked_run.call_args_list[1].args[2]
+        self.assertIn("byte-select-option", eval_expression)
+        self.assertIn("10", eval_expression)
+
+    def test_toutiao_main_publish_with_schedule_uses_schedule_path(self):
+        argv = [
+            "toutiao_publisher.py",
+            "article.md",
+            "--mode",
+            "publish",
+            "--scheduled-publish-at",
+            "2026-03-30T09:30",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            toutiao_publisher,
+            "load_article",
+            return_value=("标题", "正文", "<p>正文</p>", "/tmp/article.md"),
+        ), patch.object(
+            toutiao_publisher, "find_toutiao_target", return_value="target-1"
+        ), patch.object(
+            toutiao_publisher, "ensure_editor_ready", return_value="target-1"
+        ), patch.object(
+            toutiao_publisher, "inject_article", return_value='{"title":"标题","bodyLength":2}'
+        ), patch.object(
+            toutiao_publisher, "choose_cover_mode", return_value="checked"
+        ), patch.object(
+            toutiao_publisher, "cover_mode_is_selected", return_value=True
+        ), patch.object(
+            toutiao_publisher, "choose_required_radio", return_value="clicked"
+        ), patch.object(
+            toutiao_publisher, "attempt_ai_declaration", return_value="checked"
+        ), patch.object(
+            toutiao_publisher, "click_text_by_xy", return_value="clicked"
+        ) as mocked_click, patch.object(
+            toutiao_publisher, "schedule_publish", return_value="scheduled"
+        ) as mocked_schedule, patch.object(
+            toutiao_publisher, "detect_publish_limit", return_value=None
+        ), patch.object(
+            toutiao_publisher, "wait_for_scheduled_publish", return_value=True
+        ), patch.object(
+            toutiao_publisher, "emit_smoke_state", return_value=None
+        ):
+            toutiao_publisher.main()
+
+        mocked_schedule.assert_called_once_with("target-1", "2026-03-30T09:30")
+        mocked_click.assert_any_call("target-1", "定时发布")
+
+    def test_yidian_attempt_ai_declaration_rechecks_after_click(self):
+        outputs = iter(
+            [
+                json.dumps(
+                    {
+                        "found": True,
+                        "checked": False,
+                        "already": False,
+                        "text": "内容由AI生成",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "found": True,
+                        "checked": True,
+                        "already": False,
+                        "text": "内容由AI生成",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+
+        with patch.object(yidian_publisher, "run_cdp", side_effect=lambda *_args: next(outputs)), patch.object(
+            yidian_publisher.time, "sleep", return_value=None
+        ):
+            result = yidian_publisher.attempt_ai_declaration("target-1")
+
+        self.assertTrue(result["checked"])
+
+    def test_yidian_wait_for_cover_upload_accepts_cover_items(self):
+        with patch.object(yidian_publisher, "wait_until", return_value=True) as mocked_wait:
+            self.assertTrue(yidian_publisher.wait_for_cover_upload("target-1"))
+
+        args = mocked_wait.call_args.args
+        self.assertEqual(args[0], "target-1")
+        self.assertIn("cover-item", args[1])
+
+    def test_yidian_ensure_content_statement_supports_no_statement(self):
+        outputs = iter(
+            [
+                json.dumps(
+                    {
+                        "found": True,
+                        "checked": False,
+                        "already": False,
+                        "text": "无需声明",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "found": True,
+                        "checked": True,
+                        "already": False,
+                        "text": "无需声明",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+
+        with patch.object(yidian_publisher, "run_cdp", side_effect=lambda *_args: next(outputs)), patch.object(
+            yidian_publisher.time, "sleep", return_value=None
+        ):
+            result = yidian_publisher.ensure_content_statement("target-1", "无需声明")
+
+        self.assertTrue(result["checked"])
+
+    def test_yidian_main_force_off_uses_default_cover_before_draft_save(self):
+        argv = [
+            "yidian_publisher.py",
+            "article.md",
+            "--mode",
+            "draft",
+            "--cover-mode",
+            "force_off",
+            "--ai-declaration-mode",
+            "force_off",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            yidian_publisher,
+            "load_article",
+            return_value=("标题", "正文", "<p>正文</p>", "/tmp/article.md"),
+        ), patch.object(
+            yidian_publisher, "find_yidian_target", return_value="target-1"
+        ), patch.object(
+            yidian_publisher, "ensure_editor_ready", return_value="target-1"
+        ), patch.object(
+            yidian_publisher, "inject_article", return_value='{"title":"标题","bodyLength":2}'
+        ), patch.object(
+            yidian_publisher, "ensure_content_statement", return_value={"found": True, "checked": True}
+        ) as mocked_statement, patch.object(
+            yidian_publisher, "select_default_cover", return_value="selected-default"
+        ) as mocked_cover, patch.object(
+            yidian_publisher, "wait_for_default_cover", return_value=True
+        ) as mocked_wait_cover, patch.object(
+            yidian_publisher, "click_action", return_value="clicked"
+        ), patch.object(
+            yidian_publisher, "emit_smoke_state", return_value=None
+        ):
+            yidian_publisher.main()
+
+        mocked_statement.assert_called_once_with("target-1", "无需声明")
+        mocked_cover.assert_called_once_with("target-1")
+        mocked_wait_cover.assert_called_once_with("target-1")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2,14 +2,26 @@ import random
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
+from PIL import Image
+
 from tiandi_engine.models.workbench import CoverAssignment
 
 COVER_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-COVER_PLATFORMS = ("jianshu", "toutiao", "yidian", "zhihu")
+COVER_PLATFORMS = ("toutiao", "yidian", "zhihu")
+MIN_COVER_DIMENSION = 64
 
 
 class CoverPoolError(RuntimeError):
     pass
+
+
+def _is_usable_cover_image(candidate: Path) -> bool:
+    try:
+        with Image.open(candidate) as image:
+            width, height = image.size
+    except Exception:
+        return False
+    return width >= MIN_COVER_DIMENSION and height >= MIN_COVER_DIMENSION
 
 
 def list_cover_files(cover_dir: Path) -> Tuple[Path, ...]:
@@ -19,7 +31,11 @@ def list_cover_files(cover_dir: Path) -> Tuple[Path, ...]:
         raise CoverPoolError(f"封面路径不是目录: {cover_dir}")
     files = []
     for candidate in cover_dir.iterdir():
-        if candidate.is_file() and candidate.suffix.lower() in COVER_IMAGE_SUFFIXES:
+        if (
+            candidate.is_file()
+            and candidate.suffix.lower() in COVER_IMAGE_SUFFIXES
+            and _is_usable_cover_image(candidate)
+        ):
             files.append(candidate)
     if not files:
         raise CoverPoolError(f"封面目录为空（无可用图片文件）: {cover_dir}")

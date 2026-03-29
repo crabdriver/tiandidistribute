@@ -12,8 +12,10 @@ import {
   saveWechatSettings,
 } from './bridge'
 import type {
+  AiDeclarationMode,
   ArticleDraft,
   BridgeResources,
+  CoverMode,
   HistoryPayload,
   ImportJob,
   Platform,
@@ -25,6 +27,7 @@ import type {
   WechatConfigStatus,
 } from './types'
 import { describeCoverPoolStatus } from './coverStatus'
+import { compactHistoryPayload, compactPublishResult } from './publishResultMemory'
 import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
 import { buildWechatBlockingMessage, describeWechatStatus } from './wechatStatus'
 import { buildResourceHints, describeBrowserSessionSummary, describePublishResult } from './workbenchFeedback'
@@ -40,6 +43,7 @@ const PLATFORM_LABELS: Record<Platform, string> = {
 }
 
 const ALL_PLATFORMS: Platform[] = ['wechat', 'zhihu', 'toutiao', 'jianshu', 'yidian']
+const COVER_CAPABLE_PLATFORMS = new Set<Platform>(['zhihu', 'toutiao', 'yidian'])
 const TAURI_RUNTIME = '__TAURI_INTERNALS__' in window
 
 type BusyAction = 'import' | 'plan' | 'publish' | 'refresh' | null
@@ -63,6 +67,9 @@ interface AppState {
   publishMode: PublishMode
   continueOnError: boolean
   templateMode: string
+  coverMode: CoverMode
+  aiDeclarationMode: AiDeclarationMode
+  scheduledPublishAt: string | null
   manualThemeByArticle: Record<string, string>
   manualCoverByArticlePlatform: Record<string, string>
   plan: PublishPlan | null
@@ -100,6 +107,9 @@ const state: AppState = {
   publishMode: 'draft',
   continueOnError: false,
   templateMode: 'default',
+  coverMode: 'auto',
+  aiDeclarationMode: 'auto',
+  scheduledPublishAt: null,
   manualThemeByArticle: {},
   manualCoverByArticlePlatform: {},
   plan: null,
@@ -163,11 +173,15 @@ async function refreshWorkbenchData() {
   render()
   try {
     const [resources, history] = await Promise.all([discoverResources(), readRecentHistory(10)])
+    const compactedHistory = history ? compactHistoryPayload(history) : history
     state.resources = resources
-    state.history = history
+    state.history = compactedHistory
     if (!state.templateMode) {
       state.templateMode = resources.defaults.template_mode
     }
+    state.coverMode = state.coverMode || resources.defaults.cover_mode
+    state.aiDeclarationMode = state.aiDeclarationMode || resources.defaults.ai_declaration_mode
+    state.scheduledPublishAt = state.scheduledPublishAt || resources.defaults.scheduled_publish_at
     state.error = null
     updateStatus(TAURI_RUNTIME ? '桌面桥已连接，等待导入内容。' : '当前在浏览器 Mock 模式下，可预览工作台结构。')
   } catch (error) {
@@ -239,6 +253,9 @@ async function replanPublishJob() {
       mode: state.publishMode,
       continueOnError: state.continueOnError,
       templateMode: state.templateMode,
+      coverMode: state.coverMode,
+      aiDeclarationMode: state.aiDeclarationMode,
+      scheduledPublishAt: state.publishMode === 'publish' ? state.scheduledPublishAt : null,
       manualThemeByArticle: state.manualThemeByArticle,
       manualCoverByArticlePlatform: state.manualCoverByArticlePlatform,
     })
@@ -330,6 +347,9 @@ function restorePlanFromHistory(failuresOnly: boolean) {
   state.publishMode = nextPlan.mode
   state.continueOnError = nextPlan.continue_on_error
   state.templateMode = nextPlan.drafts[0]?.template_mode ?? nextPlan.resources.defaults.template_mode
+  state.coverMode = nextPlan.cover_mode
+  state.aiDeclarationMode = nextPlan.ai_declaration_mode
+  state.scheduledPublishAt = nextPlan.scheduled_publish_at ?? nextPlan.resources.defaults.scheduled_publish_at
   state.plan = nextPlan
   state.publishResult = lastResult
   state.logs = []
@@ -434,7 +454,7 @@ async function handleStartPublish() {
       logLine(eventSummary(event))
       render()
     })
-    state.publishResult = result
+    state.publishResult = compactPublishResult(result)
     state.plan = {
       ...state.plan,
       publish_job: result.publish_job,
@@ -618,7 +638,7 @@ function renderCoverPanel(article: ArticleDraft | null) {
                 <span>${PLATFORM_LABELS[platform]}</span>
               </label>
               ${
-                platform !== 'wechat'
+                COVER_CAPABLE_PLATFORMS.has(platform)
                   ? `
                     <select class="cover-select" data-cover-select="${platform}" ${!article || !coverPool?.ok || !selected.includes(platform) ? 'disabled' : ''}>
                       <option value="">${coverPool?.ok ? '自动分配封面' : '封面池不可用'}</option>
@@ -631,7 +651,7 @@ function renderCoverPanel(article: ArticleDraft | null) {
                         .join('')}
                     </select>
                   `
-                  : '<span class="platform-note">微信走微信封面链路</span>'
+                  : `<span class="platform-note">${platform === 'wechat' ? '微信走微信封面链路' : '当前平台本轮不走封面分配'}</span>`
               }
             </div>
           `
@@ -647,7 +667,12 @@ function renderExecutionPanel() {
   const failedResults = listFailedResults(state.publishResult)
   const canRetryFailures = Boolean(state.plan) && hasFailedResults(state.publishResult)
   const hasDirectRetryHint = hasRetryableFailures(state.publishResult)
-  const resourceHints = buildResourceHints(state.resources, selectedPlatforms())
+  const resourceHints = buildResourceHints(state.resources, selectedPlatforms(), {
+    coverMode: state.coverMode,
+    aiDeclarationMode: state.aiDeclarationMode,
+    scheduledPublishAt: state.publishMode === 'publish' ? state.scheduledPublishAt : null,
+  })
+  const showsToutiaoSchedule = state.publishMode === 'publish' && selectedPlatforms().includes('toutiao')
   const disabled = state.drafts.length === 0 || state.busy === 'publish' || Boolean(wechatBlock)
   return `
     <section class="panel">
@@ -661,6 +686,21 @@ function renderExecutionPanel() {
             <option value="draft" ${state.publishMode === 'draft' ? 'selected' : ''}>存草稿</option>
             <option value="publish" ${state.publishMode === 'publish' ? 'selected' : ''}>直接发布</option>
           </select>
+          <select id="cover-mode-select">
+            <option value="auto" ${state.coverMode === 'auto' ? 'selected' : ''}>封面: 自动</option>
+            <option value="force_on" ${state.coverMode === 'force_on' ? 'selected' : ''}>封面: 强制开启</option>
+            <option value="force_off" ${state.coverMode === 'force_off' ? 'selected' : ''}>封面: 关闭</option>
+          </select>
+          <select id="ai-declaration-mode-select">
+            <option value="auto" ${state.aiDeclarationMode === 'auto' ? 'selected' : ''}>AI 声明: 自动</option>
+            <option value="force_on" ${state.aiDeclarationMode === 'force_on' ? 'selected' : ''}>AI 声明: 强制开启</option>
+            <option value="force_off" ${state.aiDeclarationMode === 'force_off' ? 'selected' : ''}>AI 声明: 关闭</option>
+          </select>
+          ${
+            showsToutiaoSchedule
+              ? `<input id="scheduled-publish-at-input" type="datetime-local" value="${state.scheduledPublishAt ?? ''}" title="头条号定时发布时间">`
+              : ''
+          }
           <label class="switch-field">
             <input id="continue-on-error-checkbox" type="checkbox" ${state.continueOnError ? 'checked' : ''}>
             <span>遇错继续</span>
@@ -1037,6 +1077,30 @@ function bindEvents() {
   if (publishModeSelect) {
     publishModeSelect.onchange = async () => {
       state.publishMode = publishModeSelect.value as PublishMode
+      await replanPublishJob()
+    }
+  }
+
+  const coverModeSelect = app.querySelector<HTMLSelectElement>('#cover-mode-select')
+  if (coverModeSelect) {
+    coverModeSelect.onchange = async () => {
+      state.coverMode = coverModeSelect.value as CoverMode
+      await replanPublishJob()
+    }
+  }
+
+  const aiDeclarationModeSelect = app.querySelector<HTMLSelectElement>('#ai-declaration-mode-select')
+  if (aiDeclarationModeSelect) {
+    aiDeclarationModeSelect.onchange = async () => {
+      state.aiDeclarationMode = aiDeclarationModeSelect.value as AiDeclarationMode
+      await replanPublishJob()
+    }
+  }
+
+  const scheduledPublishAtInput = app.querySelector<HTMLInputElement>('#scheduled-publish-at-input')
+  if (scheduledPublishAtInput) {
+    scheduledPublishAtInput.onchange = async () => {
+      state.scheduledPublishAt = scheduledPublishAtInput.value.trim() || null
       await replanPublishJob()
     }
   }

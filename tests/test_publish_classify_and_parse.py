@@ -92,6 +92,38 @@ class PublishClassifyResultTests(unittest.TestCase):
         }
         self.assertEqual(publish.classify_result(result), "published")
 
+    def test_classify_result_marks_browser_publish_from_page_state(self):
+        result = {
+            "platform": "jianshu",
+            "mode": "publish",
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "page_state": "published",
+        }
+        self.assertEqual(publish.classify_result(result), "published")
+
+    def test_classify_result_marks_toutiao_scheduled_publish(self):
+        result = {
+            "platform": "toutiao",
+            "mode": "publish",
+            "returncode": 0,
+            "stdout": "已设置定时发布，等待平台执行",
+            "stderr": "",
+        }
+        self.assertEqual(publish.classify_result(result), "scheduled")
+
+    def test_classify_result_marks_toutiao_scheduled_publish_from_actual_ok_log(self):
+        result = {
+            "platform": "toutiao",
+            "mode": "publish",
+            "returncode": 0,
+            "stdout": "[OK] 已设置头条号定时发布: /tmp/article.md",
+            "stderr": "",
+            "page_state": "",
+        }
+        self.assertEqual(publish.classify_result(result), "scheduled")
+
     def test_classify_result_marks_browser_draft(self):
         result = {
             "platform": "toutiao",

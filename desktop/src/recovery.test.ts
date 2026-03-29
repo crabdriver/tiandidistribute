@@ -18,6 +18,8 @@ const basePlan: PublishPlan = {
   },
   mode: 'draft',
   continue_on_error: false,
+  cover_mode: 'auto',
+  ai_declaration_mode: 'auto',
   drafts: [
     {
       article_id: 'a1',
@@ -58,6 +60,8 @@ const basePlan: PublishPlan = {
       theme_name: null,
       template_mode: 'default',
       cover_path: null,
+      cover_mode: 'auto',
+      ai_declaration_mode: 'auto',
     },
     {
       article_id: 'a1',
@@ -66,6 +70,8 @@ const basePlan: PublishPlan = {
       theme_name: null,
       template_mode: 'default',
       cover_path: null,
+      cover_mode: 'auto',
+      ai_declaration_mode: 'auto',
     },
     {
       article_id: 'a2',
@@ -74,6 +80,8 @@ const basePlan: PublishPlan = {
       theme_name: null,
       template_mode: 'default',
       cover_path: null,
+      cover_mode: 'auto',
+      ai_declaration_mode: 'auto',
     },
   ],
   resources: {
@@ -111,7 +119,13 @@ const basePlan: PublishPlan = {
     },
     runtime: { repo_root: '/mock/tiandidistribute', python_executable: 'python3' },
     config_warning: null,
-    defaults: { template_mode: 'default', cover_repeat_window: 8 },
+    defaults: {
+      template_mode: 'default',
+      cover_repeat_window: 8,
+      cover_mode: 'auto',
+      ai_declaration_mode: 'auto',
+      scheduled_publish_at: null,
+    },
   },
 }
 

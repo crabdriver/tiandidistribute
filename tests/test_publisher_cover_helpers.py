@@ -115,6 +115,113 @@ class ZhihuDeclarationTests(unittest.TestCase):
 
 
 class ToutiaoStrictSettingTests(unittest.TestCase):
+    def test_apply_cover_targets_visible_upload_input_in_drawer(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"x")
+            cover_path = handle.name
+        try:
+            with patch.object(toutiao_publisher, "choose_cover_mode", return_value="checked"), patch.object(
+                toutiao_publisher,
+                "cover_mode_is_selected",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "wait_until",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "click_visible_button",
+                return_value="button-not-found",
+            ), patch.object(
+                toutiao_publisher,
+                "run_cdp",
+                return_value="ok",
+            ) as mocked_run:
+                toutiao_publisher.apply_cover("toutiao-target", cover_path)
+
+            self.assertTrue(
+                any(
+                    call.args[:4]
+                    == (
+                        "setfile",
+                        "toutiao-target",
+                        ".btn-upload-handle input[type=file]",
+                        str(Path(cover_path).resolve()),
+                    )
+                    for call in mocked_run.call_args_list
+                )
+            )
+        finally:
+            Path(cover_path).unlink(missing_ok=True)
+
+    def test_apply_cover_falls_back_to_replace_when_add_button_missing(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"x")
+            cover_path = handle.name
+        try:
+            calls = []
+
+            def fake_run_cdp(command, target_id, *args, **kwargs):
+                calls.append((command, target_id, *args))
+                if command == "click" and args[0] == ".article-cover-add":
+                    raise RuntimeError("Element not found: .article-cover-add")
+                return "ok"
+
+            with patch.object(toutiao_publisher, "choose_cover_mode", return_value="checked"), patch.object(
+                toutiao_publisher,
+                "cover_mode_is_selected",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "wait_until",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "click_visible_button",
+                return_value="button-not-found",
+            ), patch.object(
+                toutiao_publisher,
+                "run_cdp",
+                side_effect=fake_run_cdp,
+            ):
+                toutiao_publisher.apply_cover("toutiao-target", cover_path)
+
+            self.assertIn(("click", "toutiao-target", ".article-cover-img-replace"), calls)
+        finally:
+            Path(cover_path).unlink(missing_ok=True)
+
+    def test_apply_cover_waits_for_confirm_button_to_enable(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"x")
+            cover_path = handle.name
+        try:
+            with patch.object(toutiao_publisher, "choose_cover_mode", return_value="checked"), patch.object(
+                toutiao_publisher,
+                "cover_mode_is_selected",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "wait_until",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "run_cdp",
+                return_value="ok",
+            ), patch.object(
+                toutiao_publisher,
+                "click_visible_button",
+                side_effect=["button-disabled", "clicked"],
+            ) as mocked_click, patch.object(
+                toutiao_publisher.time,
+                "sleep",
+                return_value=None,
+            ):
+                toutiao_publisher.apply_cover("toutiao-target", cover_path)
+
+            self.assertEqual(mocked_click.call_count, 2)
+        finally:
+            Path(cover_path).unlink(missing_ok=True)
+
     def test_apply_cover_raises_when_upload_verification_times_out(self):
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
             handle.write(b"x")

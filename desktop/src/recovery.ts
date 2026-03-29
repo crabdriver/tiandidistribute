@@ -1,6 +1,6 @@
 import type { Platform, PublishPlan, PublishResult } from './types'
 
-const SUCCESS_STATUSES = new Set(['published', 'draft_only', 'success_unknown', 'skipped_existing'])
+const SUCCESS_STATUSES = new Set(['published', 'scheduled', 'draft_only', 'success_unknown', 'skipped_existing'])
 
 function isFailedResult(result: Record<string, unknown>): boolean {
   if (Number(result.returncode ?? 0) !== 0) {

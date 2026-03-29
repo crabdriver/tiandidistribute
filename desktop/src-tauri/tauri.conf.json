@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:1420",
     "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 1420",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run prepare:runtime && npm run build"
   },
   "app": {
     "windows": [
@@ -26,6 +26,12 @@
   "bundle": {
     "active": true,
     "targets": "app",
+    "resources": {
+      "../runtime-dist/ordo-runtime/repo/": "ordo-runtime/repo/",
+      "../runtime-dist/ordo-runtime/python/": "ordo-runtime/python/",
+      "../runtime-dist/ordo-runtime/runtime-metadata.json": "ordo-runtime/runtime-metadata.json",
+      "../runtime-dist/ordo-runtime/node-runtime.tar.gz": "ordo-runtime/node-runtime.tar.gz"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

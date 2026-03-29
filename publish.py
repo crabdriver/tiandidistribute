@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import random
@@ -27,7 +26,13 @@ from tiandi_engine.assignment.covers import COVER_PLATFORMS, CoverPoolError, ass
 from tiandi_engine.assignment.templates import assign_templates
 from tiandi_engine.config import load_engine_config
 from tiandi_engine.platforms.base import classify_process_result
+from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
 from tiandi_engine.platforms.registry import build_platform_registry
+from tiandi_engine.results.publish_records import (
+    MAX_RECORD_LOG_LENGTH,
+    PUBLISH_RECORD_FIELDNAMES,
+    append_publish_record_at_path,
+)
 from tiandi_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
@@ -35,28 +40,11 @@ BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 CDP_RESOLVER_SCRIPT = BASE_DIR / "live_cdp_ws_resolver.mjs"
 WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
 BROWSER_SESSION_DIR = BASE_DIR / ".tiandidistribute" / "browser-session"
 BROWSER_SESSION_STATE_FILE = BROWSER_SESSION_DIR / "state.json"
-PUBLISH_RECORD_FIELDNAMES = [
-    "timestamp",
-    "article",
-    "article_id",
-    "platform",
-    "mode",
-    "theme_name",
-    "template_mode",
-    "cover_path",
-    "status",
-    "error_type",
-    "current_url",
-    "page_state",
-    "smoke_step",
-    "returncode",
-    "stdout",
-    "stderr",
-]
 PUBLISH_CONSOLE_DIR = BASE_DIR / ".tiandidistribute" / "publish-console"
 PUBLISH_CONSOLE_HTML = PUBLISH_CONSOLE_DIR / "console.html"
 PUBLISH_CONSOLE_SESSION = PUBLISH_CONSOLE_DIR / "publish-console-session.json"
@@ -107,9 +95,6 @@ BROWSER_PLATFORM_LABELS = {
 DEFAULT_PLATFORMS = ["wechat", "zhihu", "toutiao", "jianshu", "yidian"]
 BROWSER_PLATFORMS = list(PLATFORM_URLS.keys())
 COVER_PLATFORMS_SET = frozenset(COVER_PLATFORMS)
-MAX_RECORD_LOG_LENGTH = 4096
-
-
 def parse_platforms(raw_value):
     value = (raw_value or "all").strip().lower()
     if value == "all":
@@ -329,18 +314,41 @@ def build_cover_assignments_for_articles(base_dir: Path, article_ids: tuple[str,
     )
 
 
-def build_publish_context_resolver(article_paths: list[Path], platforms: list[str], template_assignments, cover_assignments):
+def normalize_publish_option_mode(value, *, field_name: str):
+    mode = str(value or "auto")
+    if mode not in PUBLISH_OPTION_MODES:
+        raise ValueError(f"{field_name} 仅支持: auto / force_on / force_off")
+    return mode
+
+
+def build_publish_context_resolver(
+    article_paths: list[Path],
+    platforms: list[str],
+    template_assignments,
+    cover_assignments,
+    *,
+    cover_mode="auto",
+    ai_declaration_mode="auto",
+):
     path_to_id = {p.resolve(): article_id_for_path(p, i) for i, p in enumerate(article_paths)}
     tmpl_by_id = {a.article_id: a for a in template_assignments} if template_assignments else {}
     cover_by_pair = {}
     for ca in cover_assignments or ():
         cover_by_pair[(ca.article_id, ca.platform)] = ca.cover_path
+    normalized_cover_mode = normalize_publish_option_mode(cover_mode, field_name="cover_mode")
+    normalized_ai_declaration_mode = normalize_publish_option_mode(
+        ai_declaration_mode, field_name="ai_declaration_mode"
+    )
 
     def context_resolver(article_path, platform):
         aid = path_to_id.get(Path(article_path).resolve())
         if aid is None:
             return None
-        blob = {"article_id": aid}
+        blob = {
+            "article_id": aid,
+            "cover_mode": normalized_cover_mode,
+            "ai_declaration_mode": normalized_ai_declaration_mode,
+        }
         if platform != "wechat":
             ta = tmpl_by_id.get(aid)
             if ta:
@@ -394,6 +402,11 @@ def get_cdp_runtime_env(*, base_dir=None, environ=None):
         env["ORDO_BROWSER_SESSION_DEBUG_PORT"] = str(settings["debug_port"])
         env["ORDO_BROWSER_SESSION_PROFILE_DIR"] = str(settings["profile_dir"])
     return env
+
+
+def is_managed_browser_connection(payload):
+    source = (payload or {}).get("source")
+    return isinstance(source, str) and source.startswith("managed_browser")
 
 
 def _now_iso():
@@ -481,7 +494,7 @@ def persist_browser_session_health(base_dir, platform, state, *, cdp_connection=
 def get_cdp_connection_metadata(base_dir=None):
     try:
         output = subprocess.run(
-            ["node", str(CDP_RESOLVER_SCRIPT), "--json"],
+            [resolve_node_executable(), str(CDP_RESOLVER_SCRIPT), "--json"],
             cwd=str(BASE_DIR),
             text=True,
             capture_output=True,
@@ -505,11 +518,20 @@ def get_cdp_connection_metadata(base_dir=None):
     return None
 
 
-def run_preflight_checks(platforms, mode, workbench, base_dir=None, cover_dir_override=None, cdp_connection=None):
+def run_preflight_checks(
+    platforms,
+    mode,
+    workbench,
+    base_dir=None,
+    cover_dir_override=None,
+    cdp_connection=None,
+    cover_mode="auto",
+):
     blockers = []
     warnings = []
     root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
     override = Path(cover_dir_override).resolve() if cover_dir_override is not None else None
+    normalized_cover_mode = normalize_publish_option_mode(cover_mode, field_name="cover_mode")
 
     if "wechat" in platforms:
         wechat = get_wechat_config_status(root)
@@ -564,18 +586,26 @@ def run_preflight_checks(platforms, mode, workbench, base_dir=None, cover_dir_ov
 
     non_wechat_cover_platforms = [p for p in platforms if p in COVER_PLATFORMS_SET]
     if non_wechat_cover_platforms:
+        if normalized_cover_mode == "force_off":
+            return blockers, warnings
         pool_info = discover_cover_pool_status(root, cover_dir_override=override)
         if not pool_info["ok"]:
             label = "、".join(non_wechat_cover_platforms)
             detail = pool_info.get("error") or "封面池不可用"
-            msg = (
-                f"非微信平台自动分配封面需要可用本地封面池（目录: {pool_info.get('cover_dir', '')}）：{detail}。"
-                f"涉及平台: {label}"
-            )
-            if mode == "publish":
-                blockers.append(msg)
+            if normalized_cover_mode == "force_on":
+                blockers.append(
+                    f"当前已明确要求启用封面，但本地封面池不可用（目录: {pool_info.get('cover_dir', '')}）：{detail}。"
+                    f"涉及平台: {label}"
+                )
             else:
-                warnings.append(msg)
+                msg = (
+                    f"非微信平台自动分配封面需要可用本地封面池（目录: {pool_info.get('cover_dir', '')}）：{detail}。"
+                    f"涉及平台: {label}"
+                )
+                if mode == "publish":
+                    blockers.append(msg)
+                else:
+                    warnings.append(msg)
 
     return blockers, warnings
 
@@ -598,94 +628,8 @@ def classify_result(result):
     return classify_process_result(result["platform"], result.get("mode"), result)
 
 
-def _maybe_migrate_publish_records_csv(path: Path):
-    return _load_publish_record_rows(path)
-
-
-def _backup_publish_records(path: Path) -> Path:
-    backup = path.with_name(f"{path.name}.bak")
-    if backup.exists():
-        backup.unlink()
-    shutil.copyfile(path, backup)
-    return backup
-
-
-def _write_publish_records_rows(path: Path, rows):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fp:
-            writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES, extrasaction="ignore")
-            writer.writeheader()
-            for existing in rows:
-                writer.writerow({k: (existing.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES})
-        tmp_path.replace(path)
-    except Exception:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        raise
-
-
-def _load_publish_record_rows(path: Path):
-    if not path.exists() or path.stat().st_size == 0:
-        return []
-    try:
-        with path.open("r", encoding="utf-8", newline="") as fp:
-            reader = csv.DictReader(fp)
-            old_fn = list(reader.fieldnames or [])
-            rows = list(reader)
-    except (OSError, UnicodeDecodeError, csv.Error):
-        _backup_publish_records(path)
-        path.unlink(missing_ok=True)
-        return []
-    if set(old_fn) == set(PUBLISH_RECORD_FIELDNAMES):
-        return [{k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES} for row in rows]
-    _backup_publish_records(path)
-    normalized_rows = [{k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES} for row in rows]
-    _write_publish_records_rows(path, normalized_rows)
-    return normalized_rows
-
-
 def append_publish_record(result):
-    path = PUBLISH_RECORDS_FILE
-    rows = _maybe_migrate_publish_records_csv(path)
-    et = result.get("error_type")
-    error_type_cell = et if et is not None and et != "" else ""
-
-    def _cell(val):
-        if val is None:
-            return ""
-        return str(val)
-
-    def _sanitize_record_log(value):
-        text = _cell(value).replace("\n", "\\n")
-        if len(text) <= MAX_RECORD_LOG_LENGTH:
-            return text
-        return text[: MAX_RECORD_LOG_LENGTH - len("...[truncated]")] + "...[truncated]"
-
-    row = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "article": result.get("article", ""),
-        "article_id": _cell(result.get("article_id")),
-        "platform": result["platform"],
-        "mode": result.get("mode", ""),
-        "theme_name": _cell(result.get("theme_name")),
-        "template_mode": _cell(result.get("template_mode")),
-        "cover_path": _cell(result.get("cover_path")),
-        "status": result.get("status", ""),
-        "error_type": error_type_cell,
-        "current_url": _cell(result.get("current_url")),
-        "page_state": _cell(result.get("page_state")),
-        "smoke_step": _cell(result.get("smoke_step")),
-        "returncode": result["returncode"],
-        "stdout": _sanitize_record_log(result.get("stdout", "")),
-        "stderr": _sanitize_record_log(result.get("stderr", "")),
-    }
-    rows.append(row)
-    _write_publish_records_rows(path, rows)
+    append_publish_record_at_path(PUBLISH_RECORDS_FILE, result)
 
 
 def print_result(result):
@@ -712,7 +656,7 @@ def print_result(result):
 
 
 def run_cdp(*args, timeout=120, base_dir=None):
-    command = ["node", str(CDP_SCRIPT), *args]
+    command = [resolve_node_executable(), str(CDP_SCRIPT), *args]
     return subprocess.run(
         command,
         cwd=str(BASE_DIR),
@@ -752,7 +696,7 @@ def iter_chrome_launch_commands(urls, platform=None, browser_session=None):
     if target_platform == "darwin":
         if extra_args:
             return [
-                ["open", "-a", app_name, *launch_urls, "--args", *extra_args]
+                ["open", "-na", app_name, *launch_urls, "--args", *extra_args]
                 for app_name in CHROME_APP_CANDIDATES
             ]
         return [["open", "-a", app_name, *launch_urls] for app_name in CHROME_APP_CANDIDATES]
@@ -762,7 +706,7 @@ def iter_chrome_launch_commands(urls, platform=None, browser_session=None):
 
 
 def describe_chrome_launch_command(command):
-    if len(command) >= 3 and command[:2] == ["open", "-a"]:
+    if len(command) >= 3 and command[:2] in (["open", "-a"], ["open", "-na"]):
         return command[2]
     if len(command) >= 5 and command[:3] == ["cmd", "/c", "start"]:
         return command[4]
@@ -772,19 +716,23 @@ def describe_chrome_launch_command(command):
 def launch_chrome(urls, base_dir=None):
     last_error = None
     browser_session = load_browser_session_settings(base_dir=base_dir)
-    for command in iter_chrome_launch_commands(urls, browser_session=browser_session):
-        app_name = describe_chrome_launch_command(command)
-        try:
-            subprocess.run(
-                command,
-                cwd=str(BASE_DIR),
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-            return app_name
-        except subprocess.CalledProcessError as exc:
-            last_error = exc
+    commands = iter_chrome_launch_commands(urls, browser_session=browser_session)
+    for attempt in range(3):
+        for command in commands:
+            app_name = describe_chrome_launch_command(command)
+            try:
+                subprocess.run(
+                    command,
+                    cwd=str(BASE_DIR),
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                return app_name
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+        if last_error and attempt < 2:
+            time.sleep(1)
     if last_error:
         raise RuntimeError("未找到可用的 Chrome/Chromium 应用，无法自动启动浏览器")
     raise RuntimeError("无法自动启动浏览器")
@@ -798,8 +746,11 @@ def list_tabs_or_none(base_dir=None):
 
 
 def ensure_chrome_ready(platforms, base_dir=None):
+    browser_session = load_browser_session_settings(base_dir=base_dir)
+    managed_required = bool(browser_session.get("enabled"))
     tabs = list_tabs_or_none(base_dir=base_dir)
-    if tabs is not None:
+    cdp_connection = get_cdp_connection_metadata(base_dir=base_dir) if managed_required else None
+    if tabs is not None and (not managed_required or is_managed_browser_connection(cdp_connection)):
         return tabs, None
 
     urls = [PLATFORM_URLS[platform] for platform in platforms]
@@ -808,10 +759,16 @@ def ensure_chrome_ready(platforms, base_dir=None):
     deadline = time.time() + 20
     while time.time() < deadline:
         tabs = list_tabs_or_none(base_dir=base_dir)
-        if tabs is not None:
+        cdp_connection = get_cdp_connection_metadata(base_dir=base_dir) if managed_required else None
+        if tabs is not None and (not managed_required or is_managed_browser_connection(cdp_connection)):
             return tabs, app_name
         time.sleep(1)
 
+    if managed_required:
+        raise RuntimeError(
+            f"已尝试自动启动 {app_name}，但仍未切换到 Ordo 托管浏览器独立调试端口。"
+            "请确认 Chrome 可以以独立 profile 启动。"
+        )
     raise RuntimeError(
         f"已尝试自动启动 {app_name}，但仍无法连接 CDP。请确认 Chrome 远程调试已开启。"
     )
@@ -888,7 +845,17 @@ def open_missing_platform_tabs(platforms, auto_launch=True):
     if not tabs:
         raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开 Chrome 并启用远程调试")
 
-    base_target = tabs[0]["target"]
+    live_targets = {tab["target"] for tab in tabs}
+    workbench = load_workbench_targets()
+    base_target = None
+    for platform in browser_platforms:
+        target = workbench.get(platform)
+        if target in live_targets:
+            base_target = target
+            break
+    if not base_target:
+        base_target = tabs[0]["target"]
+
     missing_platforms = [platform for platform in browser_platforms if not platform_tab_exists(platform, tabs)]
     if not missing_platforms:
         return []
@@ -897,8 +864,18 @@ def open_missing_platform_tabs(platforms, auto_launch=True):
         [f"window.open({PLATFORM_URLS[platform]!r}, '_blank');" for platform in missing_platforms]
     ) + " 'opened';"
     run_cdp("eval", base_target, js)
-    time.sleep(1)
-    return missing_platforms
+
+    confirmed_tabs = tabs
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        latest_tabs = list_tabs_or_none()
+        if latest_tabs:
+            confirmed_tabs = latest_tabs
+        remaining = [platform for platform in missing_platforms if not platform_tab_exists(platform, confirmed_tabs)]
+        if not remaining:
+            return missing_platforms
+        time.sleep(1)
+    return [platform for platform in missing_platforms if platform_tab_exists(platform, confirmed_tabs)]
 
 
 def warm_platforms(platforms):
@@ -1240,6 +1217,18 @@ def main():
         default="auto",
         help="微信主题分配方式：auto 自动判断；prompt 每篇手动输入；random 随机；fixed 固定使用 --wechat-theme；console 浏览器逐篇预览确认",
     )
+    parser.add_argument(
+        "--cover-mode",
+        choices=list(PUBLISH_OPTION_MODES),
+        default="auto",
+        help="任务级封面策略：auto 使用默认逻辑；force_on 强制要求封面；force_off 跳过封面设置",
+    )
+    parser.add_argument(
+        "--ai-declaration-mode",
+        choices=list(PUBLISH_OPTION_MODES),
+        default="auto",
+        help="任务级 AI 声明策略：auto 使用默认逻辑；force_on 强制要求声明；force_off 跳过声明设置",
+    )
     args = parser.parse_args()
 
     platforms = parse_platforms(args.platform)
@@ -1285,7 +1274,13 @@ def main():
         if warmed:
             print(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
 
-    blockers, warnings = run_preflight_checks(platforms, args.mode, workbench, cdp_connection=cdp_connection)
+    blockers, warnings = run_preflight_checks(
+        platforms,
+        args.mode,
+        workbench,
+        cdp_connection=cdp_connection,
+        cover_mode=args.cover_mode,
+    )
     for warning in warnings:
         print(f"[WARN] {warning}")
     for blocker in blockers:
@@ -1341,12 +1336,16 @@ def main():
 
     article_ids = tuple(article_id_for_path(p, i) for i, p in enumerate(article_paths))
     template_assignments = build_template_assignments_for_articles(BASE_DIR, article_ids)
-    cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+    cover_assignments = ()
+    if args.cover_mode != "force_off":
+        cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
     context_resolver = build_publish_context_resolver(
         article_paths,
         platforms,
         template_assignments,
         cover_assignments,
+        cover_mode=args.cover_mode,
+        ai_declaration_mode=args.ai_declaration_mode,
     )
 
     results, exit_code = run_publish_pipeline(

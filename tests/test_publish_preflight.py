@@ -4,12 +4,18 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
+
+from PIL import Image
 
 import publish
 
 
 class PublishPreflightTests(unittest.TestCase):
+    def _write_cover(self, path: Path, size=(1280, 720)):
+        Image.new("RGB", size, color=(23, 45, 67)).save(path)
+
     def test_get_cdp_runtime_env_uses_managed_browser_session_port(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -51,7 +57,7 @@ class PublishPreflightTests(unittest.TestCase):
             (base / "config.json").write_text("{broken", encoding="utf-8")
             covers = base / "covers"
             covers.mkdir()
-            (covers / "cover_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            self._write_cover(covers / "cover_1.png")
 
             blockers, warnings = publish.run_preflight_checks(
                 platforms=["zhihu"],
@@ -166,7 +172,7 @@ class PublishPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "covers").mkdir()
-            (base / "covers" / "cover_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            self._write_cover(base / "covers" / "cover_1.png")
             with patch.object(
                 publish,
                 "inspect_browser_platform_state",
@@ -199,7 +205,7 @@ class PublishPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "covers").mkdir()
-            (base / "covers" / "cover_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            self._write_cover(base / "covers" / "cover_1.png")
             with patch.object(
                 publish,
                 "inspect_browser_platform_state",
@@ -286,6 +292,56 @@ class PublishPreflightTests(unittest.TestCase):
             any("封面" in b and "zhihu" in b for b in blockers),
             msg=f"expected cover pool blocker, got {blockers!r}",
         )
+
+    def test_preflight_skips_cover_pool_warning_when_cover_mode_force_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            missing_dir = base / "no_covers_here"
+            with patch.object(
+                publish,
+                "inspect_browser_platform_state",
+                return_value={
+                    "editor_ready": True,
+                    "page_state": "editor_ready",
+                    "current_url": "https://example.com/write",
+                    "detail": "写作编辑器已就绪",
+                },
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["toutiao", "yidian"],
+                    mode="draft",
+                    workbench={"toutiao": "t-1", "yidian": "y-1"},
+                    base_dir=base,
+                    cover_dir_override=missing_dir,
+                    cover_mode="force_off",
+                )
+        self.assertEqual(blockers, [])
+        self.assertEqual(warnings, [])
+
+    def test_preflight_blocks_when_cover_mode_force_on_and_pool_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            missing_dir = base / "no_covers_here"
+            with patch.object(
+                publish,
+                "inspect_browser_platform_state",
+                return_value={
+                    "editor_ready": True,
+                    "page_state": "editor_ready",
+                    "current_url": "https://example.com/write",
+                    "detail": "写作编辑器已就绪",
+                },
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["zhihu"],
+                    mode="draft",
+                    workbench={"zhihu": "t-1"},
+                    base_dir=base,
+                    cover_dir_override=missing_dir,
+                    cover_mode="force_on",
+                )
+        self.assertEqual(warnings, [])
+        self.assertTrue(any("封面" in item and "已明确要求启用" in item for item in blockers), blockers)
 
     def test_preflight_warns_draft_when_non_wechat_cover_pool_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -498,10 +554,24 @@ class ChromeLaunchTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(len(commands), 1)
-        self.assertEqual(commands[0][:3], ["open", "-a", "Google Chrome"])
+        self.assertEqual(commands[0][:3], ["open", "-na", "Google Chrome"])
         self.assertIn("--args", commands[0])
         self.assertIn("--remote-debugging-port=9333", commands[0])
         self.assertIn("--user-data-dir=/tmp/ordo-profile", commands[0])
+
+    def test_iter_chrome_launch_commands_macos_managed_uses_new_instance(self):
+        commands = publish.iter_chrome_launch_commands(
+            ["https://example.com"],
+            platform="darwin",
+            browser_session={
+                "enabled": True,
+                "debug_port": 9333,
+                "profile_dir": "/tmp/ordo-profile",
+            },
+        )
+
+        self.assertGreaterEqual(len(commands), 1)
+        self.assertEqual(commands[0][:3], ["open", "-na", "Google Chrome"])
 
     def test_iter_chrome_launch_commands_windows_uses_start_command(self):
         commands = publish.iter_chrome_launch_commands(["https://example.com"], platform="win32")
@@ -516,6 +586,158 @@ class ChromeLaunchTests(unittest.TestCase):
         commands = publish.iter_chrome_launch_commands(["https://example.com"], platform="darwin")
 
         self.assertEqual(commands[0], ["open", "-a", "Google Chrome", "https://example.com"])
+
+    def test_launch_chrome_retries_after_transient_failure(self):
+        command = ["open", "-na", "Google Chrome", "https://example.com"]
+        transient = subprocess.CalledProcessError(1, command, stderr="application is shutting down")
+
+        with patch.object(
+            publish,
+            "load_browser_session_settings",
+            return_value={"enabled": True, "debug_port": 9333, "profile_dir": "/tmp/ordo-profile"},
+        ), patch.object(
+            publish,
+            "iter_chrome_launch_commands",
+            return_value=[command],
+        ), patch.object(
+            publish.subprocess,
+            "run",
+            side_effect=[transient, CompletedProcess(command, 0, "", "")],
+        ) as mocked_run, patch.object(
+            publish.time, "sleep", return_value=None
+        ):
+            app_name = publish.launch_chrome(["https://example.com"])
+
+        self.assertEqual(app_name, "Google Chrome")
+        self.assertEqual(mocked_run.call_count, 2)
+
+    def test_ensure_chrome_ready_launches_managed_browser_when_current_source_is_system(self):
+        existing_tabs = [{"target": "sys-1", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"}]
+        managed_tabs = [{"target": "managed-1", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"}]
+
+        with patch.object(
+            publish,
+            "load_browser_session_settings",
+            return_value={"enabled": True, "debug_port": 9333, "profile_dir": "/tmp/ordo-profile"},
+        ), patch.object(
+            publish,
+            "list_tabs_or_none",
+            side_effect=[existing_tabs, managed_tabs],
+        ), patch.object(
+            publish,
+            "get_cdp_connection_metadata",
+            side_effect=[
+                {"source": "macos_devtools_port_file", "detail": "system"},
+                {"source": "managed_browser_port", "detail": "managed"},
+            ],
+        ), patch.object(
+            publish,
+            "launch_chrome",
+            return_value="Google Chrome",
+        ) as mocked_launch, patch.object(
+            publish.time, "sleep", return_value=None
+        ):
+            tabs, launched = publish.ensure_chrome_ready(["zhihu"])
+
+        self.assertEqual(tabs, managed_tabs)
+        self.assertEqual(launched, "Google Chrome")
+        mocked_launch.assert_called_once()
+
+    def test_ensure_chrome_ready_reuses_existing_tabs_when_managed_source_is_active(self):
+        tabs = [{"target": "managed-1", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"}]
+
+        with patch.object(
+            publish,
+            "load_browser_session_settings",
+            return_value={"enabled": True, "debug_port": 9333, "profile_dir": "/tmp/ordo-profile"},
+        ), patch.object(
+            publish,
+            "list_tabs_or_none",
+            return_value=tabs,
+        ), patch.object(
+            publish,
+            "get_cdp_connection_metadata",
+            return_value={"source": "managed_browser_port", "detail": "managed"},
+        ), patch.object(
+            publish,
+            "launch_chrome",
+            return_value="Google Chrome",
+        ) as mocked_launch:
+            result_tabs, launched = publish.ensure_chrome_ready(["zhihu"])
+
+        self.assertEqual(result_tabs, tabs)
+        self.assertIsNone(launched)
+        mocked_launch.assert_not_called()
+
+    def test_open_missing_platform_tabs_prefers_live_workbench_target_as_opener(self):
+        tabs = [
+            {"target": "zhihu-live", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"},
+            {"target": "toutiao-live", "title": "头条号", "url": "https://mp.toutiao.com/profile_v4/graphic/publish"},
+        ]
+        tabs_after_open = tabs + [
+            {"target": "yidian-live", "title": "一点号", "url": "https://mp.yidianzixun.com/#/Writing/articleEditor"},
+        ]
+
+        with patch.object(
+            publish,
+            "ensure_chrome_ready",
+            return_value=(tabs, None),
+        ), patch.object(
+            publish,
+            "load_workbench_targets",
+            return_value={"toutiao": "toutiao-live"},
+        ), patch.object(
+            publish,
+            "run_cdp",
+            return_value="opened",
+        ) as mocked_run_cdp, patch.object(
+            publish,
+            "list_tabs_or_none",
+            side_effect=[tabs, tabs_after_open],
+        ), patch.object(
+            publish.time, "sleep", return_value=None
+        ):
+            opened = publish.open_missing_platform_tabs(["zhihu", "toutiao", "yidian"], auto_launch=True)
+
+        self.assertEqual(opened, ["yidian"])
+        self.assertEqual(mocked_run_cdp.call_args.args[1], "toutiao-live")
+
+    def test_open_missing_platform_tabs_waits_until_missing_tabs_appear(self):
+        initial_tabs = [
+            {"target": "zhihu-live", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"},
+            {"target": "toutiao-live", "title": "头条号", "url": "https://mp.toutiao.com/profile_v4/graphic/publish"},
+        ]
+        restored_tabs = initial_tabs + [
+            {"target": "yidian-live", "title": "一点号", "url": "https://mp.yidianzixun.com/#/Writing/articleEditor"},
+            {"target": "jianshu-live", "title": "简书", "url": "https://www.jianshu.com/writer#/"},
+        ]
+
+        with patch.object(
+            publish,
+            "ensure_chrome_ready",
+            return_value=(initial_tabs, None),
+        ), patch.object(
+            publish,
+            "load_workbench_targets",
+            return_value={"zhihu": "zhihu-live"},
+        ), patch.object(
+            publish,
+            "run_cdp",
+            return_value="opened",
+        ), patch.object(
+            publish,
+            "list_tabs_or_none",
+            side_effect=[initial_tabs, restored_tabs],
+        ) as mocked_list_tabs, patch.object(
+            publish.time, "sleep", return_value=None
+        ):
+            opened = publish.open_missing_platform_tabs(
+                ["zhihu", "toutiao", "yidian", "jianshu"],
+                auto_launch=True,
+            )
+
+        self.assertEqual(opened, ["yidian", "jianshu"])
+        self.assertEqual(mocked_list_tabs.call_count, 2)
 
     def test_describe_cdp_connection_prefers_managed_browser_source(self):
         detail = publish.describe_cdp_connection(

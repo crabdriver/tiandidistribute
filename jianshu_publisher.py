@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from markdown_utils import normalize_markdown_source
+from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,6 +15,7 @@ CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 JIANSHU_MATCH = "jianshu.com"
 JIANSHU_WRITER_URL = "https://www.jianshu.com/writer#/"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
 
 
 def clean_title(title):
@@ -38,7 +40,7 @@ def strip_unsupported_local_images(markdown_text):
 
 def run_cdp(command, *args, timeout=120):
     result = subprocess.run(
-        ["node", str(CDP_SCRIPT), command, *args],
+        [resolve_node_executable(), str(CDP_SCRIPT), command, *args],
         cwd=str(BASE_DIR),
         text=True,
         capture_output=True,
@@ -397,8 +399,24 @@ def main():
         default=None,
         help="可选文章标识（编排层预留，当前发布流程可不使用）。",
     )
+    parser.add_argument(
+        "--cover-mode",
+        choices=PUBLISH_OPTION_MODES,
+        default="auto",
+        help="任务级封面策略：auto / force_on / force_off",
+    )
+    parser.add_argument(
+        "--ai-declaration-mode",
+        dest="ai_declaration_mode",
+        choices=PUBLISH_OPTION_MODES,
+        default="auto",
+        help="任务级 AI 声明策略：auto / force_on / force_off",
+    )
     args = parser.parse_args()
-    _ = (args.theme, args.template_mode, args.article_id)
+    _ = (args.theme, args.template_mode, args.article_id, args.cover_mode, args.ai_declaration_mode)
+
+    if args.cover_mode == "force_on":
+        raise RuntimeError("简书当前没有稳定可用的封面上传入口，暂不支持 `封面: 强制开启`。")
 
     if args.cover:
         raise RuntimeError(
@@ -439,7 +457,10 @@ def main():
         raise RuntimeError(f"简书正文/标题注入异常: {inject_result}")
     print(f"[INFO] 已写入简书编辑器: {inject_result}")
 
-    attempt_ai_declaration(target_id)
+    if args.ai_declaration_mode != "force_off":
+        attempt_ai_declaration(target_id)
+    else:
+        print("[INFO] 已显式关闭简书 AI 创作声明设置")
 
     if args.mode == "draft":
         if not editor_content_ready(target_id, title, timeout_seconds=20):

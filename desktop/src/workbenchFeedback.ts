@@ -1,4 +1,4 @@
-import type { BridgeResources, Platform } from './types'
+import type { AiDeclarationMode, BridgeResources, CoverMode, Platform } from './types'
 
 const BROWSER_LABELS: Record<Platform, string> = {
   wechat: '微信',
@@ -7,8 +7,17 @@ const BROWSER_LABELS: Record<Platform, string> = {
   jianshu: '简书',
   yidian: '一点号',
 }
+const COVER_CAPABLE_PLATFORMS = new Set<Platform>(['zhihu', 'toutiao', 'yidian'])
 
-export function buildResourceHints(resources: BridgeResources | null, platforms: Platform[]): string[] {
+export function buildResourceHints(
+  resources: BridgeResources | null,
+  platforms: Platform[],
+  publishOptions?: {
+    coverMode?: CoverMode
+    aiDeclarationMode?: AiDeclarationMode
+    scheduledPublishAt?: string | null
+  },
+): string[] {
   if (!resources) {
     return []
   }
@@ -40,9 +49,28 @@ export function buildResourceHints(resources: BridgeResources | null, platforms:
     hints.push(`${platformLabels(resources.browser.session_state.relogin_required_platforms)}当前检测到需要重新登录。`)
   }
 
-  const needsCoverPool = platforms.some((platform) => platform !== 'wechat')
-  if (needsCoverPool && !resources.cover_pool.ok) {
+  const needsCoverPool = platforms.some((platform) => COVER_CAPABLE_PLATFORMS.has(platform))
+  const coverMode = publishOptions?.coverMode ?? 'auto'
+  const aiDeclarationMode = publishOptions?.aiDeclarationMode ?? 'auto'
+  const scheduledPublishAt = publishOptions?.scheduledPublishAt?.trim() ?? ''
+  if (coverMode === 'force_off') {
+    hints.push('当前已选择本轮不带封面，平台脚本会跳过封面设置。')
+  } else if (coverMode === 'force_on') {
+    hints.push('当前已选择本轮强制带封面；若封面池不可用，发布前应先修复。')
+  }
+  if (aiDeclarationMode === 'force_off') {
+    hints.push('当前已选择关闭 AI 声明；知乎 / 头条号 / 简书 / 一点号将跳过声明设置。')
+  } else if (aiDeclarationMode === 'force_on') {
+    hints.push('当前已选择强制开启 AI 声明；若平台结构变化，发布会直接失败并提示。')
+  }
+  if (coverMode !== 'force_off' && needsCoverPool && !resources.cover_pool.ok) {
     hints.push(`非微信平台封面池未就绪，请把默认封面放到 ${resources.cover_pool.cover_dir}。`)
+  }
+  if (coverMode === 'force_off' && platforms.includes('yidian') && publishOptions && publishOptions.coverMode === 'force_off') {
+    hints.push('一点号在直接发布模式下暂不支持彻底无封面，必要时会回退到平台默认封面。')
+  }
+  if (platforms.includes('toutiao') && scheduledPublishAt) {
+    hints.push(`头条号将尝试按 ${scheduledPublishAt} 定时发布；若超出平台允许窗口，会直接报错而不是静默回退。`)
   }
   if (resources.config_warning) {
     hints.push(resources.config_warning)

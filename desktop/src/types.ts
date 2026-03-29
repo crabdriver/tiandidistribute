@@ -1,6 +1,8 @@
 export type Platform = 'wechat' | 'zhihu' | 'toutiao' | 'jianshu' | 'yidian'
 export type PublishMode = 'draft' | 'publish'
 export type TemplateMode = 'default' | 'custom'
+export type CoverMode = 'auto' | 'force_on' | 'force_off'
+export type AiDeclarationMode = 'auto' | 'force_on' | 'force_off'
 
 export interface ArticleDraft {
   article_id: string
@@ -116,6 +118,9 @@ export interface BridgeResources {
   defaults: {
     template_mode: string
     cover_repeat_window: number
+    cover_mode: CoverMode
+    ai_declaration_mode: AiDeclarationMode
+    scheduled_publish_at: string | null
   }
 }
 
@@ -149,6 +154,7 @@ export interface PublishJob {
   skip_count: number
   recoverable: boolean
   error_summary: string
+  scheduled_publish_at?: string | null
 }
 
 export interface StagedArticle {
@@ -163,12 +169,18 @@ export interface PublishContext {
   theme_name: string | null
   template_mode: string
   cover_path: string | null
+  cover_mode: CoverMode
+  ai_declaration_mode: AiDeclarationMode
+  scheduled_publish_at?: string | null
 }
 
 export interface PublishPlan {
   publish_job: PublishJob
   mode: PublishMode
   continue_on_error: boolean
+  cover_mode: CoverMode
+  ai_declaration_mode: AiDeclarationMode
+  scheduled_publish_at?: string | null
   drafts: ArticleDraft[]
   template_assignments: TemplateAssignment[]
   cover_assignments: CoverAssignment[]

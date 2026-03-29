@@ -1,9 +1,11 @@
 import subprocess
 from pathlib import Path
 
+from .node_runtime import resolve_node_executable
+
 
 def build_cdp_command(base_dir: Path, *args):
-    return ["node", str(Path(base_dir) / "live_cdp.mjs"), *args]
+    return [resolve_node_executable(), str(Path(base_dir) / "live_cdp.mjs"), *args]
 
 
 def run_cdp(base_dir: Path, *args, timeout=120):

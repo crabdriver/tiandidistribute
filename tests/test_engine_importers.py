@@ -221,11 +221,13 @@ class TestWorkbenchToDict(unittest.TestCase):
             skip_count=0,
             recoverable=True,
             error_summary="",
+            scheduled_publish_at="2026-03-30T09:30",
         )
         self.assertFalse(ta.to_dict()["is_confirmed"])
         self.assertEqual(ca.to_dict()["platform"], "zhihu")
         self.assertEqual(pj.to_dict()["current_step"], "zhihu:login")
         self.assertTrue(pj.to_dict()["recoverable"])
+        self.assertEqual(pj.to_dict()["scheduled_publish_at"], "2026-03-30T09:30")
 
 
 if __name__ == "__main__":

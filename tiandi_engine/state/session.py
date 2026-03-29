@@ -5,7 +5,7 @@ from pathlib import Path
 from tiandi_engine.results.errors import ErrorType
 
 
-SUCCESS_STATUSES = {"published", "draft_only", "success_unknown"}
+SUCCESS_STATUSES = {"published", "scheduled", "draft_only", "success_unknown"}
 SKIPPED_STATUSES = {"skipped_existing"}
 FAILURE_STATUSES = {"failed", "limit_reached"}
 

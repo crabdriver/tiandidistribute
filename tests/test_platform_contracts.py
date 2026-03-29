@@ -1,9 +1,10 @@
 import subprocess
 import sys
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
-from tiandi_engine.platforms.base import BasePlatformAdapter
+from tiandi_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
 from tiandi_engine.platforms.registry import build_platform_registry
 from tiandi_engine.results.errors import ErrorType
 
@@ -46,6 +47,8 @@ class PlatformContractTests(unittest.TestCase):
             cover_path="/tmp/cover.png",
             template_mode="rich",
             article_id="rev-1",
+            cover_mode="force_on",
+            ai_declaration_mode="force_off",
         )
 
         self.assertEqual(prepared["platform"], "zhihu")
@@ -59,7 +62,39 @@ class PlatformContractTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--template-mode") + 1], "rich")
         self.assertIn("--article-id", cmd)
         self.assertEqual(cmd[cmd.index("--article-id") + 1], "rev-1")
+        self.assertIn("--cover-mode", cmd)
+        self.assertEqual(cmd[cmd.index("--cover-mode") + 1], "force_on")
+        self.assertIn("--ai-declaration-mode", cmd)
+        self.assertEqual(cmd[cmd.index("--ai-declaration-mode") + 1], "force_off")
         self.assertEqual(prepared.get("article_id"), "rev-1")
+
+    def test_jianshu_prepare_accepts_publish_option_modes(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        prepared = registry["jianshu"].prepare(
+            markdown_file="/tmp/article.md",
+            mode="draft",
+            cover_mode="auto",
+            ai_declaration_mode="force_off",
+        )
+
+        cmd = prepared["command"]
+        self.assertIn("--cover-mode", cmd)
+        self.assertEqual(cmd[cmd.index("--cover-mode") + 1], "auto")
+        self.assertIn("--ai-declaration-mode", cmd)
+        self.assertEqual(cmd[cmd.index("--ai-declaration-mode") + 1], "force_off")
+
+    def test_toutiao_prepare_accepts_scheduled_publish_at(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        prepared = registry["toutiao"].prepare(
+            markdown_file="/tmp/article.md",
+            mode="publish",
+            scheduled_publish_at="2026-03-30T09:30",
+        )
+
+        cmd = prepared["command"]
+        self.assertIn("--scheduled-publish-at", cmd)
+        self.assertEqual(cmd[cmd.index("--scheduled-publish-at") + 1], "2026-03-30T09:30")
+        self.assertEqual(prepared.get("scheduled_publish_at"), "2026-03-30T09:30")
 
     def test_browser_publish_scripts_accept_theme_cover_in_help(self):
         repo_root = Path(__file__).resolve().parent.parent
@@ -80,6 +115,10 @@ class PlatformContractTests(unittest.TestCase):
             self.assertIn("--theme", helptext, msg=script)
             self.assertIn("--cover", helptext, msg=script)
             self.assertIn("--article-id", helptext, msg=script)
+            self.assertIn("--cover-mode", helptext, msg=script)
+            self.assertIn("--ai-declaration-mode", helptext, msg=script)
+            if script == "toutiao_publisher.py":
+                self.assertIn("--scheduled-publish-at", helptext, msg=script)
 
     def test_collect_result_builds_structured_failure(self):
         registry = build_platform_registry(Path("/tmp/repo"))
@@ -144,6 +183,69 @@ class PlatformContractTests(unittest.TestCase):
 
         self.assertEqual(result.error_type, ErrorType.ENVIRONMENT_ERROR)
         self.assertFalse(result.retryable)
+
+    def test_collect_result_marks_missing_platform_control_as_platform_changed(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        result = registry["zhihu"].collect_result(
+            {
+                "platform": "zhihu",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "创作声明未找到",
+                "smoke_step": "declare_ai_creation",
+            },
+            mode="publish",
+        )
+
+        self.assertEqual(result.error_type, ErrorType.PLATFORM_CHANGED)
+        self.assertFalse(result.retryable)
+
+    def test_collect_result_preserves_current_url_and_page_state(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        result = registry["zhihu"].collect_result(
+            {
+                "platform": "zhihu",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "创作声明未找到",
+                "current_url": "https://zhuanlan.zhihu.com/write",
+                "page_state": "editor_ready",
+                "smoke_step": "declare_ai_creation",
+            },
+            mode="publish",
+        )
+
+        self.assertEqual(result.current_url, "https://zhuanlan.zhihu.com/write")
+        self.assertEqual(result.page_state, "editor_ready")
+        self.assertEqual(result.smoke_step, "declare_ai_creation")
+
+    def test_subprocess_adapter_extracts_structured_smoke_state_from_output(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "fake_browser.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "print('script-started')",
+                        "print('[SMOKE_STATE] ' + json.dumps({",
+                        "    'current_url': 'https://example.com/write',",
+                        "    'page_state': 'editor_ready',",
+                        "    'smoke_step': 'inject_article'",
+                        "}, ensure_ascii=False))",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            adapter = SubprocessPlatformAdapter(root, "zhihu", "fake_browser.py")
+            prepared = adapter.prepare(markdown_file="/tmp/post.md", mode="draft")
+
+            process_result = adapter.publish(prepared)
+
+        self.assertEqual(process_result["stdout"], "script-started")
+        self.assertEqual(process_result["current_url"], "https://example.com/write")
+        self.assertEqual(process_result["page_state"], "editor_ready")
+        self.assertEqual(process_result["smoke_step"], "inject_article")
 
 
 if __name__ == "__main__":

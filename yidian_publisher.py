@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from markdown_utils import render_markdown_html
+from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -15,8 +16,11 @@ YIDIAN_MATCH = "mp.yidianzixun.com"
 YIDIAN_EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
 YIDIAN_COVER_FILE_INPUT = ".upload-input"
 YIDIAN_SINGLE_COVER_TEXT = "单图"
+YIDIAN_NO_DECLARATION = "无需声明"
 YIDIAN_AI_DECLARATION = "内容由AI生成"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
+SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
 
 
 def clean_title(title):
@@ -25,7 +29,7 @@ def clean_title(title):
 
 def run_cdp(command, *args, timeout=120):
     result = subprocess.run(
-        ["node", str(CDP_SCRIPT), command, *args],
+        [resolve_node_executable(), str(CDP_SCRIPT), command, *args],
         cwd=str(BASE_DIR),
         text=True,
         capture_output=True,
@@ -122,6 +126,37 @@ def wait_until(target_id, expression, timeout_seconds=20, interval_seconds=1):
             return True
         time.sleep(interval_seconds)
     return False
+
+
+def emit_smoke_state(target_id, smoke_step, page_state, *, error=None):
+    if not target_id:
+        return
+    try:
+        output = run_cdp(
+            "eval",
+            target_id,
+            """
+(() => {
+  const titleEl = document.querySelector("input.post-title");
+  const editor = document.querySelector(".editor-content[contenteditable='true']");
+  const bodyText = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+  return JSON.stringify({
+    current_url: location.href,
+    has_title_input: !!titleEl,
+    has_editor: !!editor,
+    page_hint: bodyText.slice(0, 120)
+  });
+})()
+""".strip(),
+        )
+        payload = json.loads(output)
+    except Exception as exc:
+        payload = {"current_url": "", "capture_error": str(exc)}
+    payload["smoke_step"] = smoke_step
+    payload["page_state"] = page_state
+    if error:
+        payload["error"] = str(error)
+    print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
 
 def ensure_editor_ready(target_id):
@@ -278,13 +313,14 @@ def wait_for_default_cover(target_id, timeout_seconds=10, interval_seconds=1):
 def wait_for_cover_upload(target_id, timeout_seconds=10, interval_seconds=1):
     expression = """
 (() => {
-  const root = document.querySelector('.cover-content, .cover-wrap, .cover-box, .cover-type') || document.body;
+  const root = document.querySelector('.cover-content, .cover-wrap, .cover-box, .cover-type, .article-setting') || document.body;
   const hasPreview = !!root.querySelector(
     'img, .cover-preview img, .preview img, .upload-list img, .cover-box img, [style*="background-image"]'
   );
+  const hasCoverItems = root.querySelectorAll('.cover-item.draggable, .cover-item').length > 0;
   const bodyText = (root.innerText || document.body.innerText || '').replace(/\s+/g, '');
   const hasSuccessText = ['更换封面', '重新上传', '裁剪', '删除', '预览'].some(text => bodyText.includes(text));
-  return hasPreview || hasSuccessText;
+  return hasPreview || hasCoverItems || hasSuccessText;
 })()
 """
     return wait_until(target_id, expression, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
@@ -318,38 +354,54 @@ def wait_for_any_text(target_id, texts, timeout_seconds=20, interval_seconds=1):
     return wait_until(target_id, expression, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
 
 
-def attempt_ai_declaration(target_id):
-    target_json = json.dumps(YIDIAN_AI_DECLARATION, ensure_ascii=False)
+def ensure_content_statement(target_id, option_text):
+    target_json = json.dumps(option_text, ensure_ascii=False)
     expression = (
         "(() => {"
         "  const targetText = " + target_json + ";"
         "  const normalize = (text) => (text || '').replace(/\\s+/g, '');"
-        "  const selectors = '.content-claim label, .content-claim .item, label, .item, [role=radio], [role=checkbox], span, div';"
+        "  const selectors = '.content-statement-container .item, .content-statement-container .text, .content-claim label, .content-claim .item, label, .item, [role=radio], [role=checkbox], span, div';"
         "  const nodes = Array.from(document.querySelectorAll(selectors));"
         "  const target = nodes.find(node => normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '') === normalize(targetText));"
         "  if (!target) return JSON.stringify({found: false});"
+        "  const control = target.closest('.item, label, [role=radio], [role=checkbox]') || target;"
         "  const readChecked = () => !!("
+        "    control.classList.contains('checked') ||"
         "    target.classList.contains('checked') ||"
+        "    control.getAttribute('aria-checked') === 'true' ||"
         "    target.getAttribute('aria-checked') === 'true' ||"
+        "    control.querySelector('input:checked') ||"
         "    target.querySelector('input:checked') ||"
+        "    control.querySelector('.checked') ||"
         "    target.querySelector('.checked')"
         "  );"
         "  if (readChecked()) return JSON.stringify({found: true, checked: true, already: true});"
-        "  target.click();"
-        "  return JSON.stringify({found: true, checked: readChecked(), already: false, text: (target.innerText || target.textContent || '').trim()});"
+        "  control.click();"
+        "  return JSON.stringify({found: true, checked: readChecked(), already: false, text: (control.innerText || target.innerText || target.textContent || '').trim()});"
         "})()"
     )
     raw = run_cdp("eval", target_id, expression)
     result = json.loads(raw)
 
     if not result.get("found"):
-        raise RuntimeError(f"一点号未找到内容声明选项「{YIDIAN_AI_DECLARATION}」")
+        raise RuntimeError(f"一点号未找到内容声明选项「{option_text}」")
 
     if result.get("checked"):
-        print(f"[INFO] 一点号 AI 创作声明已勾选: {result}")
+        print(f"[INFO] 一点号内容声明已勾选: {result}")
         return result
 
-    raise RuntimeError(f"一点号内容声明「{YIDIAN_AI_DECLARATION}」勾选失败: {result}")
+    time.sleep(0.6)
+    verify_raw = run_cdp("eval", target_id, expression)
+    verify_result = json.loads(verify_raw)
+    if verify_result.get("found") and verify_result.get("checked"):
+        print(f"[INFO] 一点号内容声明已勾选: {verify_result}")
+        return verify_result
+
+    raise RuntimeError(f"一点号内容声明「{option_text}」勾选失败: {result}")
+
+
+def attempt_ai_declaration(target_id):
+    return ensure_content_statement(target_id, YIDIAN_AI_DECLARATION)
 
 
 def detect_publish_limit(target_id):
@@ -400,66 +452,124 @@ def main():
         default=None,
         help="可选文章标识（编排层预留，当前发布流程可不使用）。",
     )
+    parser.add_argument(
+        "--cover-mode",
+        choices=PUBLISH_OPTION_MODES,
+        default="auto",
+        help="任务级封面策略：auto / force_on / force_off",
+    )
+    parser.add_argument(
+        "--ai-declaration-mode",
+        dest="ai_declaration_mode",
+        choices=PUBLISH_OPTION_MODES,
+        default="auto",
+        help="任务级 AI 声明策略：auto / force_on / force_off",
+    )
     args = parser.parse_args()
     _ = (args.theme, args.template_mode, args.article_id)
 
     title, _body, html, article_path = load_article(args.markdown_file)
-    target_id = find_yidian_target()
-    if not target_id:
-        raise RuntimeError("没有找到一点号标签页，请先在当前 Chrome 中打开并登录一点号发文页")
+    target_id = None
+    smoke_step = "find_target"
+    page_state = "starting"
 
-    target_id = ensure_editor_ready(target_id)
-    result = inject_article(target_id, title, html)
-    print(f"[INFO] 已写入一点号编辑器: {result}")
+    try:
+        target_id = find_yidian_target()
+        if not target_id:
+            raise RuntimeError("没有找到一点号标签页，请先在当前 Chrome 中打开并登录一点号发文页")
 
-    attempt_ai_declaration(target_id)
+        smoke_step = "ensure_editor_ready"
+        target_id = ensure_editor_ready(target_id)
+        page_state = "editor_ready"
 
-    if args.cover:
-        apply_cover(target_id, args.cover)
+        smoke_step = "inject_article"
+        result = inject_article(target_id, title, html)
+        page_state = "article_injected"
+        print(f"[INFO] 已写入一点号编辑器: {result}")
 
-    if args.mode == "draft":
-        action = click_action(target_id, "存草稿")
+        if args.ai_declaration_mode != "force_off":
+            smoke_step = "attempt_ai_declaration"
+            attempt_ai_declaration(target_id)
+            page_state = "ai_declared"
+        else:
+            smoke_step = "clear_ai_declaration"
+            clear_result = ensure_content_statement(target_id, YIDIAN_NO_DECLARATION)
+            print(f"[INFO] 已切换一点号内容声明为无需声明: {clear_result}")
+
+        smoke_step = "apply_cover"
+        if args.cover_mode == "force_on" and not args.cover:
+            raise RuntimeError("一点号已要求启用封面，但当前任务没有可用封面路径")
+        if args.cover_mode != "force_off" and args.cover:
+            apply_cover(target_id, args.cover)
+            page_state = "cover_ready"
+        elif args.cover_mode == "force_off":
+            cover_result = select_default_cover(target_id)
+            print(f"[INFO] 已切换一点号封面为默认: {cover_result}")
+            if not wait_for_default_cover(target_id):
+                raise RuntimeError("一点号默认封面未选中，无法继续保存草稿")
+
+        if args.mode == "draft":
+            smoke_step = "draft_saved"
+            action = click_action(target_id, "存草稿")
+            if action != "clicked":
+                raise RuntimeError(f"点击存草稿失败: {action}")
+            page_state = "draft_saved"
+            emit_smoke_state(target_id, smoke_step, page_state)
+            print(f"[OK] 已存草稿: {article_path}")
+            return
+
+        if args.cover_mode == "force_off":
+            smoke_step = "select_default_cover"
+            cover_result = select_default_cover(target_id)
+            print(f"[WARN] 一点号发布模式暂不支持彻底关闭封面，已回退到平台默认封面: {cover_result}")
+            if not wait_for_default_cover(target_id):
+                raise RuntimeError("一点号默认封面未选中，无法继续发布")
+        elif not args.cover:
+            smoke_step = "select_default_cover"
+            cover_result = select_default_cover(target_id)
+            print(f"[INFO] 已尝试切换默认封面: {cover_result}")
+            if not wait_for_default_cover(target_id):
+                raise RuntimeError("默认封面未选中，无法继续发布")
+
+        smoke_step = "publish_ready"
+        publish_ready = wait_for_button(target_id, "发布", timeout_seconds=10)
+        if not publish_ready:
+            raise RuntimeError("发布按钮仍不可点击，请检查页面是否还有未填项")
+
+        smoke_step = "publish_click"
+        action = click_action(target_id, "发布")
         if action != "clicked":
-            raise RuntimeError(f"点击存草稿失败: {action}")
-        print(f"[OK] 已存草稿: {article_path}")
-        return
+            raise RuntimeError(f"点击发布失败: {action}")
 
-    if not args.cover:
-        cover_result = select_default_cover(target_id)
-        print(f"[INFO] 已尝试切换默认封面: {cover_result}")
-        if not wait_for_default_cover(target_id):
-            raise RuntimeError("默认封面未选中，无法继续发布")
+        if wait_for_button(target_id, "确定", timeout_seconds=8):
+            smoke_step = "publish_confirm"
+            confirm_action = click_action(target_id, "确定")
+            if confirm_action != "clicked":
+                raise RuntimeError(f"点击发布确认失败: {confirm_action}")
+            print("[INFO] 已确认发布弹窗")
 
-    publish_ready = wait_for_button(target_id, "发布", timeout_seconds=10)
-    if not publish_ready:
-        raise RuntimeError("发布按钮仍不可点击，请检查页面是否还有未填项")
-
-    action = click_action(target_id, "发布")
-    if action != "clicked":
-        raise RuntimeError(f"点击发布失败: {action}")
-
-    if wait_for_button(target_id, "确定", timeout_seconds=8):
-        confirm_action = click_action(target_id, "确定")
-        if confirm_action != "clicked":
-            raise RuntimeError(f"点击发布确认失败: {confirm_action}")
-        print("[INFO] 已确认发布弹窗")
-
-    limit_marker = detect_publish_limit(target_id)
-    if limit_marker and "审核通过前你将无法继续编辑" not in limit_marker:
-        raise RuntimeError(f"一点号发布受限: {limit_marker}")
-
-    if not wait_for_any_text(target_id, ["发布成功", "查看文章", "再写一篇"], timeout_seconds=20):
         limit_marker = detect_publish_limit(target_id)
-        if limit_marker:
+        if limit_marker and "审核通过前你将无法继续编辑" not in limit_marker:
             raise RuntimeError(f"一点号发布受限: {limit_marker}")
-        raise RuntimeError("未检测到一点号发布成功提示，请检查页面状态")
 
-    if wait_for_button(target_id, "查看文章", timeout_seconds=5):
-        view_action = click_action(target_id, "查看文章")
-        if view_action != "clicked":
-            raise RuntimeError(f"点击查看文章失败: {view_action}")
+        smoke_step = "published"
+        if not wait_for_any_text(target_id, ["发布成功", "查看文章", "再写一篇"], timeout_seconds=20):
+            limit_marker = detect_publish_limit(target_id)
+            if limit_marker:
+                raise RuntimeError(f"一点号发布受限: {limit_marker}")
+            raise RuntimeError("未检测到一点号发布成功提示，请检查页面状态")
 
-    print(f"[OK] 已发布成功: {article_path}")
+        if wait_for_button(target_id, "查看文章", timeout_seconds=5):
+            view_action = click_action(target_id, "查看文章")
+            if view_action != "clicked":
+                raise RuntimeError(f"点击查看文章失败: {view_action}")
+
+        page_state = "published"
+        emit_smoke_state(target_id, smoke_step, page_state)
+        print(f"[OK] 已发布成功: {article_path}")
+    except Exception as exc:
+        emit_smoke_state(target_id, smoke_step, page_state, error=exc)
+        raise
 
 
 if __name__ == "__main__":

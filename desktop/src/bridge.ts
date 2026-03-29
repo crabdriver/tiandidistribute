@@ -3,7 +3,9 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 
 import type {
+  AiDeclarationMode,
   BridgeResources,
+  CoverMode,
   HistoryPayload,
   ImportJob,
   Platform,
@@ -95,6 +97,9 @@ function mockResources(): BridgeResources {
     defaults: {
       template_mode: 'default',
       cover_repeat_window: 8,
+      cover_mode: 'auto',
+      ai_declaration_mode: 'auto',
+      scheduled_publish_at: null,
     },
   }
 }
@@ -168,9 +173,13 @@ async function mockBridgeRequest<T>(payload: Record<string, unknown>): Promise<T
         skip_count: 0,
         recoverable: true,
         error_summary: '',
+        scheduled_publish_at: String(payload.scheduled_publish_at ?? '').trim() || null,
       },
       mode: payload.mode ?? 'draft',
       continue_on_error: Boolean(payload.continue_on_error),
+      cover_mode: String(payload.cover_mode ?? 'auto') as CoverMode,
+      ai_declaration_mode: String(payload.ai_declaration_mode ?? 'auto') as AiDeclarationMode,
+      scheduled_publish_at: String(payload.scheduled_publish_at ?? '').trim() || null,
       drafts,
       template_assignments: [],
       cover_assignments: [],
@@ -186,6 +195,12 @@ async function mockBridgeRequest<T>(payload: Record<string, unknown>): Promise<T
           theme_name: null,
           template_mode: 'default',
           cover_path: null,
+          cover_mode: String(payload.cover_mode ?? 'auto') as CoverMode,
+          ai_declaration_mode: String(payload.ai_declaration_mode ?? 'auto') as AiDeclarationMode,
+          scheduled_publish_at:
+            platform === 'toutiao' && payload.mode === 'publish'
+              ? String(payload.scheduled_publish_at ?? '').trim() || null
+              : null,
         })),
       ),
       resources: mockResources(),
@@ -280,6 +295,9 @@ export async function planPublishJob(payload: {
   templateMode: string
   manualThemeByArticle: Record<string, string>
   manualCoverByArticlePlatform: Record<string, string>
+  coverMode: CoverMode
+  aiDeclarationMode: AiDeclarationMode
+  scheduledPublishAt: string | null
 }) {
   return bridgeRequest<PublishPlan>({
     command: 'plan_publish_job',
@@ -290,6 +308,9 @@ export async function planPublishJob(payload: {
     template_mode: payload.templateMode,
     manual_theme_by_article: payload.manualThemeByArticle,
     manual_cover_by_article_platform: payload.manualCoverByArticlePlatform,
+    cover_mode: payload.coverMode,
+    ai_declaration_mode: payload.aiDeclarationMode,
+    scheduled_publish_at: payload.scheduledPublishAt,
   })
 }
 

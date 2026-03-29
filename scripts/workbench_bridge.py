@@ -9,8 +9,12 @@ ROOT_DIR = SCRIPT_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from publish import append_publish_record  # noqa: E402
+from tiandi_engine.results.publish_records import append_publish_record_at_path  # noqa: E402
 from tiandi_engine.workbench.bridge import handle_bridge_command  # noqa: E402
+
+
+def append_publish_record(result):
+    append_publish_record_at_path(ROOT_DIR / "publish_records.csv", result)
 
 
 def main():

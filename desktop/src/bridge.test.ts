@@ -26,6 +26,9 @@ describe('desktop mock bridge', () => {
       templateMode: 'default',
       manualThemeByArticle: {},
       manualCoverByArticlePlatform: {},
+      coverMode: 'auto',
+      aiDeclarationMode: 'auto',
+      scheduledPublishAt: null,
     })
 
     const seen: string[] = []
@@ -51,9 +54,37 @@ describe('desktop mock bridge', () => {
       templateMode: 'default',
       manualThemeByArticle: {},
       manualCoverByArticlePlatform: {},
+      coverMode: 'force_off',
+      aiDeclarationMode: 'force_off',
+      scheduledPublishAt: null,
     })
 
     expect(plan.continue_on_error).toBe(true)
+    expect(plan.cover_mode).toBe('force_off')
+    expect(plan.ai_declaration_mode).toBe('force_off')
+  })
+
+  it('keeps scheduled_publish_at in publish planning payload', async () => {
+    const imported = await importSources({
+      importMode: 'paste',
+      pastedText: '标题C\n\n正文C',
+    })
+    const plan = await planPublishJob({
+      drafts: imported.job.drafts,
+      platforms: ['toutiao'],
+      mode: 'publish',
+      continueOnError: false,
+      templateMode: 'default',
+      manualThemeByArticle: {},
+      manualCoverByArticlePlatform: {},
+      coverMode: 'auto',
+      aiDeclarationMode: 'auto',
+      scheduledPublishAt: '2026-03-30T09:30',
+    })
+
+    expect(plan.scheduled_publish_at).toBe('2026-03-30T09:30')
+    expect(plan.publish_job.scheduled_publish_at).toBe('2026-03-30T09:30')
+    expect(plan.context_map[0].scheduled_publish_at).toBe('2026-03-30T09:30')
   })
 
   it('reads and saves wechat settings in browser mock mode', async () => {

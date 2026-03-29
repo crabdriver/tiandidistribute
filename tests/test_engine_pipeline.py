@@ -24,6 +24,9 @@ class DummyAdapter(BasePlatformAdapter):
         cover_path=None,
         template_mode=None,
         article_id=None,
+        cover_mode=None,
+        ai_declaration_mode=None,
+        scheduled_publish_at=None,
     ):
         return {
             "platform": self.platform,
@@ -42,6 +45,9 @@ class DummyAdapter(BasePlatformAdapter):
             "cover_path": cover_path,
             "template_mode": template_mode,
             "article_id": article_id,
+            "cover_mode": cover_mode,
+            "ai_declaration_mode": ai_declaration_mode,
+            "scheduled_publish_at": scheduled_publish_at,
         }
 
     def publish(self, prepared_context):
@@ -173,6 +179,9 @@ class EnginePipelineTests(unittest.TestCase):
             cover_path="/tmp/c.png",
             template_mode="rich",
             article_id="aid-9",
+            cover_mode="force_on",
+            ai_declaration_mode="force_off",
+            scheduled_publish_at="2026-03-30T09:30",
             registry=registry,
         )
 
@@ -180,10 +189,16 @@ class EnginePipelineTests(unittest.TestCase):
         self.assertEqual(captured.get("cover_path"), "/tmp/c.png")
         self.assertEqual(captured.get("template_mode"), "rich")
         self.assertEqual(captured.get("article_id"), "aid-9")
+        self.assertEqual(captured.get("cover_mode"), "force_on")
+        self.assertEqual(captured.get("ai_declaration_mode"), "force_off")
+        self.assertEqual(captured.get("scheduled_publish_at"), "2026-03-30T09:30")
         self.assertEqual(result.get("theme_name"), "t1")
         self.assertEqual(result.get("cover_path"), "/tmp/c.png")
         self.assertEqual(result.get("template_mode"), "rich")
         self.assertEqual(result.get("article_id"), "aid-9")
+        self.assertEqual(result.get("cover_mode"), "force_on")
+        self.assertEqual(result.get("ai_declaration_mode"), "force_off")
+        self.assertEqual(result.get("scheduled_publish_at"), "2026-03-30T09:30")
 
     def test_run_publish_pipeline_uses_context_resolver(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -207,6 +222,9 @@ class EnginePipelineTests(unittest.TestCase):
                     "cover_path": str(Path(tmpdir) / "cover.png"),
                     "template_mode": "plain",
                     "article_id": "x-1",
+                    "cover_mode": "auto",
+                    "ai_declaration_mode": "force_on",
+                    "scheduled_publish_at": "2026-03-30T09:30",
                 }
 
             results, exit_code = run_publish_pipeline(
@@ -224,11 +242,17 @@ class EnginePipelineTests(unittest.TestCase):
         self.assertEqual(results[0].get("theme_name"), "ctx-theme")
         self.assertEqual(results[0].get("template_mode"), "plain")
         self.assertEqual(results[0].get("article_id"), "x-1")
+        self.assertEqual(results[0].get("cover_mode"), "auto")
+        self.assertEqual(results[0].get("ai_declaration_mode"), "force_on")
+        self.assertEqual(results[0].get("scheduled_publish_at"), "2026-03-30T09:30")
         for key in (
             "article_id",
             "theme_name",
             "template_mode",
             "cover_path",
+            "cover_mode",
+            "ai_declaration_mode",
+            "scheduled_publish_at",
             "platform",
             "status",
             "error_type",
@@ -301,7 +325,18 @@ class EnginePipelineTests(unittest.TestCase):
         """主入口 / GUI 消费方应能依赖这些键存在（值可为 None）。"""
 
         class MinimalPrepareAdapter(DummyAdapter):
-            def prepare(self, markdown_file, mode, theme_name=None, cover_path=None, template_mode=None, article_id=None):
+            def prepare(
+                self,
+                markdown_file,
+                mode,
+                theme_name=None,
+                cover_path=None,
+                template_mode=None,
+                article_id=None,
+                cover_mode=None,
+                ai_declaration_mode=None,
+                scheduled_publish_at=None,
+            ):
                 return {
                     "platform": self.platform,
                     "command": ["dummy", str(markdown_file), mode],
@@ -330,6 +365,9 @@ class EnginePipelineTests(unittest.TestCase):
             "theme_name",
             "template_mode",
             "cover_path",
+            "cover_mode",
+            "ai_declaration_mode",
+            "scheduled_publish_at",
             "platform",
             "status",
             "error_type",

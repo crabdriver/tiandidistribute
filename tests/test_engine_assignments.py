@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from tiandi_engine.assignment.covers import (
     COVER_PLATFORMS,
     CoverPoolError,
@@ -79,8 +81,11 @@ class TemplateAssignmentTests(unittest.TestCase):
 
 class CoverAssignmentTests(unittest.TestCase):
     def _write_cover(self, d: Path, name: str):
+        return self._write_png_cover(d, name, (1280, 720))
+
+    def _write_png_cover(self, d: Path, name: str, size):
         p = d / name
-        p.write_bytes(b"\x89PNG\r\n\x1a\n")
+        Image.new("RGB", size, color=(12, 34, 56)).save(p)
         return p
 
     def test_assign_covers_is_article_times_platform(self):
@@ -99,7 +104,7 @@ class CoverAssignmentTests(unittest.TestCase):
                 seed=0,
             )
             keys = {(x.article_id, x.platform) for x in out}
-            self.assertEqual(keys, {("art1", "zhihu"), ("art1", "toutiao"), ("art1", "jianshu")})
+            self.assertEqual(keys, {("art1", "zhihu"), ("art1", "toutiao")})
             self.assertEqual(COVER_PLATFORMS, tuple(sorted(COVER_PLATFORMS)))
 
     def test_same_article_different_platforms_prefers_distinct_covers_when_pool_allows(self):
@@ -137,6 +142,17 @@ class CoverAssignmentTests(unittest.TestCase):
             )
             self.assertEqual(len(out), 1)
             self.assertEqual(out[0].cover_path.resolve(), p2.resolve())
+
+    def test_list_cover_files_skips_tiny_placeholder_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cdir = Path(tmp) / "covers"
+            cdir.mkdir()
+            self._write_png_cover(cdir, "tiny.png", (1, 1))
+            valid = self._write_png_cover(cdir, "valid.png", (1280, 720))
+
+            files = list_cover_files(cdir)
+
+        self.assertEqual([path.resolve() for path in files], [valid.resolve()])
 
     def test_missing_cover_dir_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

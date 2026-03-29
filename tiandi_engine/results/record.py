@@ -14,6 +14,8 @@ class ExecutionResult:
     stdout: str = ""
     stderr: str = ""
     current_url: str = ""
+    page_state: str = ""
+    smoke_step: str = ""
     retryable: bool = False
 
     def to_dict(self):
@@ -26,5 +28,7 @@ class ExecutionResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "current_url": self.current_url,
+            "page_state": self.page_state,
+            "smoke_step": self.smoke_step,
             "retryable": self.retryable,
         }

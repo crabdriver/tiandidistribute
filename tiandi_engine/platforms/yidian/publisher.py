@@ -13,6 +13,8 @@ class YidianPlatformAdapter(SubprocessPlatformAdapter):
             supports_cover=True,
             supports_template_mode=True,
             supports_article_id=True,
+            supports_cover_mode=True,
+            supports_ai_declaration_mode=True,
         )
 
     def prepare(
@@ -23,6 +25,9 @@ class YidianPlatformAdapter(SubprocessPlatformAdapter):
         cover_path=None,
         template_mode=None,
         article_id=None,
+        cover_mode=None,
+        ai_declaration_mode=None,
+        scheduled_publish_at=None,
     ):
         return super().prepare(
             markdown_file=markdown_file,
@@ -31,4 +36,7 @@ class YidianPlatformAdapter(SubprocessPlatformAdapter):
             cover_path=cover_path,
             template_mode=template_mode,
             article_id=article_id,
+            cover_mode=cover_mode,
+            ai_declaration_mode=ai_declaration_mode,
+            scheduled_publish_at=scheduled_publish_at,
         )

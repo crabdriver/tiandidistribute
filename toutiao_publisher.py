@@ -4,9 +4,11 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 from markdown_utils import render_markdown_html
+from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,7 +16,10 @@ CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 TOUTIAO_MATCH = "mp.toutiao.com"
 TOUTIAO_EDITOR_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
 TOUTIAO_COVER_FILE_INPUT = "#upload-drag-input"
+TOUTIAO_COVER_FILE_INPUT_SELECTORS = ('.btn-upload-handle input[type=file]', TOUTIAO_COVER_FILE_INPUT)
 AI_CHECKBOX_LABEL = "引用AI"
+SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
 
 
 def clean_title(title):
@@ -41,7 +46,7 @@ def run_cdp(command, *args, timeout=120):
     for attempt in range(3):
         try:
             result = subprocess.run(
-                ["node", str(CDP_SCRIPT), command, *args],
+                [resolve_node_executable(), str(CDP_SCRIPT), command, *args],
                 cwd=str(BASE_DIR),
                 text=True,
                 capture_output=True,
@@ -105,6 +110,37 @@ def wait_until(target_id, expression, timeout_seconds=20, interval_seconds=1):
             return True
         time.sleep(interval_seconds)
     return False
+
+
+def emit_smoke_state(target_id, smoke_step, page_state, *, error=None):
+    if not target_id:
+        return
+    try:
+        output = run_cdp(
+            "eval",
+            target_id,
+            """
+(() => {
+  const titleEl = document.querySelector('textarea[placeholder="请输入文章标题（2～30个字）"]');
+  const editor = document.querySelector('.ProseMirror');
+  const bodyText = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+  return JSON.stringify({
+    current_url: location.href,
+    has_title_input: !!titleEl,
+    has_editor: !!editor,
+    page_hint: bodyText.slice(0, 120)
+  });
+})()
+""".strip(),
+        )
+        payload = json.loads(output)
+    except Exception as exc:
+        payload = {"current_url": "", "capture_error": str(exc)}
+    payload["smoke_step"] = smoke_step
+    payload["page_state"] = page_state
+    if error:
+        payload["error"] = str(error)
+    print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
 
 def ensure_editor_ready(target_id):
@@ -231,27 +267,46 @@ def apply_cover(target_id, cover_path):
     cover_result = choose_cover_mode(target_id, label_text="单图", attempts=5)
     if not cover_mode_is_selected(target_id, "单图"):
         raise RuntimeError(f"头条封面未切换到单图: {cover_result}")
-    run_cdp("click", target_id, ".article-cover-add")
+    try:
+        run_cdp("click", target_id, ".article-cover-add")
+    except RuntimeError as exc:
+        if ".article-cover-add" not in str(exc):
+            raise
+        run_cdp("click", target_id, ".article-cover-img-replace")
     time.sleep(0.7)
-    run_cdp("setfile", target_id, TOUTIAO_COVER_FILE_INPUT, str(path))
-    uploaded = wait_until(
-        target_id,
-        """
-(() => {
-  const coverRoot = document.querySelector('.cover-component, .article-cover, .article-cover-wrap, .article-cover-list') || document.body;
-  const hasPreview = !!coverRoot.querySelector(
-    'img, .article-cover-item img, .article-cover-preview img, .byte-upload-list-item img, .upload-list-item img, [style*="background-image"]'
-  );
-  const bodyText = (coverRoot.innerText || document.body.innerText || '').replace(/\s+/g, '');
-  const hasSuccessText = ['更换封面', '重新上传', '裁剪', '裁切', '封面管理', '删除'].some(text => bodyText.includes(text));
-  return hasPreview || hasSuccessText;
-})()
-""".strip(),
-        timeout_seconds=12,
-        interval_seconds=1,
-    )
+    upload_error = None
+    for selector in TOUTIAO_COVER_FILE_INPUT_SELECTORS:
+        try:
+            run_cdp("setfile", target_id, selector, str(path))
+            upload_error = None
+            break
+        except RuntimeError as exc:
+            upload_error = exc
+    if upload_error is not None:
+        raise RuntimeError(f"头条封面未找到可用上传 input: {upload_error}") from upload_error
+    uploaded = wait_for_cover_upload(target_id, timeout_seconds=15, interval_seconds=1)
     if not uploaded:
         raise RuntimeError(f"头条封面上传后未检测到预览或成功状态: {path.name}")
+    confirm_result = click_visible_button(target_id, "确定")
+    if confirm_result == "button-disabled":
+        for _ in range(5):
+            time.sleep(1)
+            confirm_result = click_visible_button(target_id, "确定")
+            if confirm_result != "button-disabled":
+                break
+    if confirm_result == "clicked":
+        time.sleep(1)
+        wait_until(
+            target_id,
+            """(() => {
+  const content = (document.body.innerText || '').replace(/\s+/g, '');
+  return !content.includes('已上传1张图片') || !content.includes('支持拖拽调整图片顺序');
+})()""",
+            timeout_seconds=10,
+            interval_seconds=1,
+        )
+    elif confirm_result not in {"button-not-found"}:
+        raise RuntimeError(f"头条封面上传后确认按钮状态异常: {confirm_result}")
     print(f"[INFO] 已向头条封面控件注入文件: {path}")
 
 
@@ -364,6 +419,230 @@ def wait_for_any_text(target_id, texts, timeout_seconds=20, interval_seconds=1):
     return wait_until(target_id, expression.strip(), timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
 
 
+def select_byte_option(target_id, trigger_selector, option_text):
+    selector_json = json.dumps(trigger_selector, ensure_ascii=False)
+    trigger_result = run_cdp(
+        "eval",
+        target_id,
+        f"""
+(() => {{
+  const trigger = document.querySelector({selector_json});
+  if (!trigger) return 'trigger-not-found';
+  trigger.click();
+  return 'clicked';
+}})()
+""".strip(),
+    )
+    if trigger_result != "clicked":
+        raise RuntimeError(f"头条号下拉触发失败: {trigger_selector} ({trigger_result})")
+    time.sleep(0.5)
+    option_json = json.dumps(str(option_text), ensure_ascii=False)
+    result = run_cdp(
+        "eval",
+        target_id,
+        f"""
+(() => {{
+  const normalize = (text) => (text || '').replace(/\\s+/g, '');
+  const trigger = document.querySelector({selector_json});
+  if (!trigger) return 'trigger-not-found';
+  const current = trigger.querySelector('.byte-select-view-value');
+  if (current && normalize(current.innerText || current.textContent || '') === normalize({option_json})) return 'already-selected';
+  const option = Array.from(document.querySelectorAll('li.byte-select-option, .byte-select-option, [role="option"]')).find(
+    el => normalize(el.innerText || el.textContent || '') === normalize({option_json})
+  );
+  if (!option) return 'option-not-found';
+  option.click();
+  return 'clicked';
+}})()
+""".strip(),
+    )
+    if result not in {"clicked", "already-selected"}:
+        raise RuntimeError(f"头条号下拉选择失败: {trigger_selector} -> {option_text} ({result})")
+    return result
+
+
+def wait_for_cover_upload(target_id, timeout_seconds=15, interval_seconds=1):
+    expression = """
+(() => {
+  const root = document.querySelector('.upload-image-panel, .cover-component, .article-cover, .article-cover-wrap, .article-cover-list') || document.body;
+  const pageText = (document.body.innerText || '').replace(/\\s+/g, '');
+  const hasPreview = !!root.querySelector(
+    'img[src^="http"], .article-cover-item img, .article-cover-preview img, .byte-upload-list-item img, .upload-list-item img, [style*="background-image"]'
+  );
+  const bodyText = ((root.innerText || '') + pageText).replace(/\\s+/g, '');
+  const hasSuccessText = [
+    '更换封面',
+    '重新上传',
+    '裁剪',
+    '裁切',
+    '封面管理',
+    '删除',
+    '已上传',
+    '支持拖拽调整图片顺序'
+  ].some(text => bodyText.includes(text));
+  return hasPreview || hasSuccessText;
+})()
+""".strip()
+    return wait_until(target_id, expression, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
+
+
+def wait_for_draft_saved(target_id, timeout_seconds=12):
+    signals = [
+        "草稿已保存",
+        "草稿将自动保存",
+        "草稿保存中",
+        "已保存到草稿",
+    ]
+    return wait_for_any_text(target_id, signals, timeout_seconds=timeout_seconds, interval_seconds=1)
+
+
+def normalize_scheduled_publish_at(value):
+    raw = str(value or "").strip()
+    if not raw:
+        raise RuntimeError("头条号定时发布缺少 scheduled_publish_at")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise RuntimeError("头条号定时发布时间格式无效，应为 ISO 本地时间，例如 2026-03-30T09:30") from exc
+    return parsed.strftime("%Y-%m-%dT%H:%M")
+
+
+def schedule_publish(target_id, scheduled_publish_at):
+    normalized = normalize_scheduled_publish_at(scheduled_publish_at)
+    date_value, time_value = normalized.split("T", 1)
+    schedule_dt = datetime.fromisoformat(normalized)
+
+    schedule_controls_ready = run_cdp(
+        "eval",
+        target_id,
+        """
+(() => !!document.querySelector('.day-select, .hour-select, .minute-select'))()
+""".strip(),
+    )
+    if schedule_controls_ready != "true":
+        mode_result = run_cdp(
+        "eval",
+        target_id,
+        """
+(() => {
+  const normalize = (text) => (text || '').replace(/\s+/g, '');
+  const visible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const options = ['定时发布', '预约发布'];
+  const nodes = Array.from(document.querySelectorAll('label, button, [role="radio"], .byte-radio, .radio, span, div'));
+  const node = nodes.find((el) => visible(el) && options.includes(normalize(el.innerText || el.textContent || '')));
+  if (!node) return 'schedule-option-not-found';
+  const clickable = node.closest('label,button,[role="radio"],.byte-radio,.radio') || node;
+  clickable.click();
+  return 'clicked';
+})()
+""".strip(),
+        )
+        if mode_result not in {"clicked", "already-selected"}:
+            raise RuntimeError(f"头条号未找到定时发布入口: {mode_result}")
+
+        time.sleep(1)
+    schedule_result = run_cdp(
+        "eval",
+        target_id,
+        f"""
+(() => {{
+  const datetimeValue = {json.dumps(normalized)};
+  const dateValue = {json.dumps(date_value)};
+  const timeValue = {json.dumps(time_value)};
+  const visible = (el) => {{
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  }};
+  const setValue = (input, value) => {{
+    const setter = Object.getOwnPropertyDescriptor(input.__proto__, 'value')?.set;
+    if (setter) {{
+      setter.call(input, value);
+    }} else {{
+      input.value = value;
+    }}
+    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+  }};
+  const inputs = Array.from(document.querySelectorAll('input')).filter(visible);
+  const touched = [];
+  for (const input of inputs) {{
+    const type = (input.type || '').toLowerCase();
+    const placeholder = input.placeholder || '';
+    if (type === 'datetime-local') {{
+      setValue(input, datetimeValue);
+      touched.push(type || 'datetime-local');
+      continue;
+    }}
+    if (type === 'date' || /日期|年月日|选择日期/.test(placeholder)) {{
+      setValue(input, dateValue);
+      touched.push(type || 'date');
+      continue;
+    }}
+    if (type === 'time' || /时间|时刻|选择时间/.test(placeholder)) {{
+      setValue(input, timeValue);
+      touched.push(type || 'time');
+      continue;
+    }}
+  }}
+  return JSON.stringify({{ count: touched.length, touched }});
+}})()
+""".strip(),
+    )
+    info = json.loads(schedule_result or "{}")
+    if int(info.get("count") or 0) <= 0:
+        day_candidates = [schedule_dt.strftime("%m月%d日"), f"{schedule_dt.month:02d}月{schedule_dt.day:02d}日", f"{schedule_dt.month}月{schedule_dt.day}日"]
+        day_error = None
+        for day_text in day_candidates:
+            try:
+                select_byte_option(target_id, ".day-select", day_text)
+                day_error = None
+                break
+            except RuntimeError as exc:
+                day_error = exc
+        if day_error is not None:
+            raise RuntimeError(f"头条号定时发布未找到日期选项: {day_error}") from day_error
+        select_byte_option(target_id, ".hour-select", str(schedule_dt.hour))
+        select_byte_option(target_id, ".minute-select", str(schedule_dt.minute))
+        preview_ready = wait_until(
+            target_id,
+            f"(() => (document.body.innerText || '').includes({json.dumps(schedule_dt.strftime('%Y-%m-%d %H:%M'))}))()",
+            timeout_seconds=5,
+            interval_seconds=1,
+        )
+        if not preview_ready:
+            raise RuntimeError("头条号定时发布时间未同步到预览文案")
+
+    for button_text in ("预览并定时发布", "确认发布", "确认预约", "预约发布", "定时发布"):
+        confirm_result = click_visible_button(target_id, button_text)
+        if confirm_result == "button-disabled":
+            time.sleep(1)
+            confirm_result = click_visible_button(target_id, button_text)
+        if confirm_result == "clicked":
+            return {"scheduled_publish_at": normalized, "confirm_text": button_text}
+        if confirm_result not in {"button-not-found", "button-disabled"}:
+            raise RuntimeError(f"头条号定时发布确认按钮异常: {confirm_result}")
+    raise RuntimeError("头条号未找到定时发布确认按钮")
+
+
+def wait_for_scheduled_publish(target_id, timeout_seconds=30):
+    signals = [
+        "已设置定时发布",
+        "预约发布成功",
+        "定时发布成功",
+        "已预约发布",
+        "查看作品",
+    ]
+    return wait_for_any_text(target_id, signals, timeout_seconds=timeout_seconds, interval_seconds=1)
+
+
 def attempt_ai_declaration(target_id):
     """在「作品声明」区域精确勾选「引用AI」并做结果校验。"""
     expand_expression = """
@@ -470,71 +749,135 @@ def main():
         default=None,
         help="可选文章标识（编排层预留，当前发布流程可不使用）。",
     )
+    parser.add_argument(
+        "--cover-mode",
+        choices=PUBLISH_OPTION_MODES,
+        default="auto",
+        help="任务级封面策略：auto / force_on / force_off",
+    )
+    parser.add_argument(
+        "--ai-declaration-mode",
+        dest="ai_declaration_mode",
+        choices=PUBLISH_OPTION_MODES,
+        default="auto",
+        help="任务级 AI 声明策略：auto / force_on / force_off",
+    )
+    parser.add_argument(
+        "--scheduled-publish-at",
+        dest="scheduled_publish_at",
+        default=None,
+        help="仅头条号 publish 模式使用的定时发布时间，格式如 2026-03-30T09:30",
+    )
     args = parser.parse_args()
     _ = (args.theme, args.template_mode, args.article_id)
 
     title, _body, html_body, article_path = load_article(args.markdown_file)
-    target_id = find_toutiao_target()
-    if not target_id:
-        raise RuntimeError("没有找到头条号标签页，请先在当前 Chrome 中打开并登录头条号")
+    target_id = None
+    smoke_step = "find_target"
+    page_state = "starting"
 
-    ensure_editor_ready(target_id)
-    inject_result = inject_article(target_id, title, html_body)
-    print(f"[INFO] 已写入头条号编辑器: {inject_result}")
+    try:
+        target_id = find_toutiao_target()
+        if not target_id:
+            raise RuntimeError("没有找到头条号标签页，请先在当前 Chrome 中打开并登录头条号")
 
-    if args.cover:
-        apply_cover(target_id, args.cover)
-    else:
-        cover_result = choose_cover_mode(target_id, label_text="无封面")
-        if not cover_mode_is_selected(target_id, "无封面"):
-            raise RuntimeError(f"头条封面未切换到无封面: {cover_result}")
-        print(f"[INFO] 已切换头条封面为无封面: {cover_result}")
+        smoke_step = "ensure_editor_ready"
+        ensure_editor_ready(target_id)
+        page_state = "editor_ready"
 
-    ad_result = choose_required_radio(target_id, "投放广告", "投放广告赚收益")
-    if ad_result == "click-no-effect":
-        ad_result = click_text_by_xy(target_id, "投放广告赚收益", selector="label")
-    print(f"[INFO] 已尝试设置头条广告选项: {ad_result}")
+        smoke_step = "inject_article"
+        inject_result = inject_article(target_id, title, html_body)
+        page_state = "article_injected"
+        print(f"[INFO] 已写入头条号编辑器: {inject_result}")
 
-    attempt_ai_declaration(target_id)
+        smoke_step = "apply_cover"
+        if args.cover_mode == "force_on" and not args.cover:
+            raise RuntimeError("头条号已要求启用封面，但当前任务没有可用封面路径")
+        if args.cover_mode != "force_off" and args.cover:
+            apply_cover(target_id, args.cover)
+            page_state = "cover_ready"
+        else:
+            cover_result = choose_cover_mode(target_id, label_text="无封面")
+            if not cover_mode_is_selected(target_id, "无封面"):
+                raise RuntimeError(f"头条封面未切换到无封面: {cover_result}")
+            print(f"[INFO] 已切换头条封面为无封面: {cover_result}")
 
-    if args.mode == "draft":
-        if not wait_until(
+        smoke_step = "ad_selection"
+        ad_result = choose_required_radio(target_id, "投放广告", "投放广告赚收益")
+        if ad_result == "click-no-effect":
+            ad_result = click_text_by_xy(target_id, "投放广告赚收益", selector="label")
+        print(f"[INFO] 已尝试设置头条广告选项: {ad_result}")
+
+        if args.ai_declaration_mode != "force_off":
+            smoke_step = "attempt_ai_declaration"
+            attempt_ai_declaration(target_id)
+            page_state = "ai_declared"
+        else:
+            print("[INFO] 已显式关闭头条号 AI 声明设置")
+
+        if args.mode == "draft":
+            smoke_step = "draft_saved"
+            if not wait_for_draft_saved(target_id, timeout_seconds=12):
+                raise RuntimeError("未检测到头条号草稿提示")
+            page_state = "draft_saved"
+            emit_smoke_state(target_id, smoke_step, page_state)
+            print(f"[OK] 已写入头条草稿页: {article_path}")
+            return
+
+        smoke_step = "publish_click"
+        publish_button_text = "定时发布" if args.scheduled_publish_at else "预览并发布"
+        publish_result = click_text_by_xy(target_id, publish_button_text)
+        if publish_result != "clicked":
+            raise RuntimeError(f"点击头条发布失败: {publish_result}")
+
+        if args.scheduled_publish_at:
+            smoke_step = "schedule_publish"
+            schedule_publish(target_id, args.scheduled_publish_at)
+            limit_marker = detect_publish_limit(target_id)
+            if limit_marker:
+                raise RuntimeError(f"头条号定时发布受限: {limit_marker}")
+            smoke_step = "scheduled"
+            if not wait_for_scheduled_publish(target_id, timeout_seconds=30):
+                limit_marker = detect_publish_limit(target_id)
+                if limit_marker:
+                    raise RuntimeError(f"头条号定时发布受限: {limit_marker}")
+                raise RuntimeError("未检测到头条号定时发布成功提示，请检查页面状态")
+            page_state = "scheduled"
+            emit_smoke_state(target_id, smoke_step, page_state)
+            print(f"[OK] 已设置头条号定时发布: {article_path}")
+            return
+
+        if wait_until(
             target_id,
-            "(() => ['草稿已保存', '草稿将自动保存'].some(text => (document.body.innerText || '').includes(text)))()",
-            timeout_seconds=10,
+            "(() => Array.from(document.querySelectorAll('button')).some(btn => (btn.innerText || '').replace(/\\s+/g, '') === '确认发布'))()",
+            timeout_seconds=8,
         ):
-            raise RuntimeError("未检测到头条号草稿提示")
-        print(f"[OK] 已写入头条草稿页: {article_path}")
-        return
+            smoke_step = "publish_confirm"
+            confirm_result = click_text_by_xy(target_id, "确认发布")
+            if confirm_result != "clicked":
+                raise RuntimeError(f"点击头条确认发布失败: {confirm_result}")
 
-    publish_result = click_text_by_xy(target_id, "预览并发布")
-    if publish_result != "clicked":
-        raise RuntimeError(f"点击头条发布失败: {publish_result}")
-
-    if wait_until(
-        target_id,
-        "(() => Array.from(document.querySelectorAll('button')).some(btn => (btn.innerText || '').replace(/\\s+/g, '') === '确认发布'))()",
-        timeout_seconds=8,
-    ):
-        confirm_result = click_text_by_xy(target_id, "确认发布")
-        if confirm_result != "clicked":
-            raise RuntimeError(f"点击头条确认发布失败: {confirm_result}")
-
-    limit_marker = detect_publish_limit(target_id)
-    if limit_marker:
-        raise RuntimeError(f"头条号发布受限: {limit_marker}")
-
-    if not wait_until(
-        target_id,
-        "(() => (document.body.innerText || '').includes('发布成功') || (document.body.innerText || '').includes('查看作品') || location.href.includes('/graphic/articles') || !location.href.includes('/graphic/publish'))()",
-        timeout_seconds=30,
-    ):
         limit_marker = detect_publish_limit(target_id)
         if limit_marker:
             raise RuntimeError(f"头条号发布受限: {limit_marker}")
-        raise RuntimeError("未检测到头条号发布成功提示，请检查页面状态")
 
-    print(f"[OK] 已发布到头条号: {article_path}")
+        smoke_step = "published"
+        if not wait_until(
+            target_id,
+            "(() => (document.body.innerText || '').includes('发布成功') || (document.body.innerText || '').includes('查看作品') || location.href.includes('/graphic/articles') || !location.href.includes('/graphic/publish'))()",
+            timeout_seconds=30,
+        ):
+            limit_marker = detect_publish_limit(target_id)
+            if limit_marker:
+                raise RuntimeError(f"头条号发布受限: {limit_marker}")
+            raise RuntimeError("未检测到头条号发布成功提示，请检查页面状态")
+
+        page_state = "published"
+        emit_smoke_state(target_id, smoke_step, page_state)
+        print(f"[OK] 已发布到头条号: {article_path}")
+    except Exception as exc:
+        emit_smoke_state(target_id, smoke_step, page_state, error=exc)
+        raise
 
 
 if __name__ == "__main__":

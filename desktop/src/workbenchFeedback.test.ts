@@ -55,6 +55,9 @@ const resources: BridgeResources = {
   defaults: {
     template_mode: 'default',
     cover_repeat_window: 8,
+    cover_mode: 'auto',
+    ai_declaration_mode: 'auto',
+    scheduled_publish_at: null,
   },
 }
 
@@ -100,6 +103,22 @@ describe('workbench feedback helpers', () => {
       text: '浏览器会话需重登：头条号',
       tone: 'danger',
     })
+  })
+
+  it('shows explicit hints for publish option overrides', () => {
+    expect(
+      buildResourceHints(resources, ['zhihu'], {
+        coverMode: 'force_off',
+        aiDeclarationMode: 'force_off',
+      }),
+    ).toContain('当前已选择本轮不带封面，平台脚本会跳过封面设置。')
+
+    expect(
+      buildResourceHints(resources, ['zhihu'], {
+        coverMode: 'force_on',
+        aiDeclarationMode: 'force_on',
+      }),
+    ).toContain('当前已选择本轮强制带封面；若封面池不可用，发布前应先修复。')
   })
 
   it('formats publish result details for display', () => {

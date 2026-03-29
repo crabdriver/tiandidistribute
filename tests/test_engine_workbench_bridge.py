@@ -1,9 +1,14 @@
 import io
 import json
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from PIL import Image
 
 from tiandi_engine.platforms.base import BasePlatformAdapter
 
@@ -23,6 +28,9 @@ class DummyAdapter(BasePlatformAdapter):
         cover_path=None,
         template_mode=None,
         article_id=None,
+        cover_mode=None,
+        ai_declaration_mode=None,
+        scheduled_publish_at=None,
     ):
         return {
             "platform": self.platform,
@@ -32,6 +40,9 @@ class DummyAdapter(BasePlatformAdapter):
             "cover_path": cover_path,
             "template_mode": template_mode,
             "article_id": article_id,
+            "cover_mode": cover_mode,
+            "ai_declaration_mode": ai_declaration_mode,
+            "scheduled_publish_at": scheduled_publish_at,
         }
 
     def publish(self, prepared_context):
@@ -63,6 +74,9 @@ class DummyAdapter(BasePlatformAdapter):
 
 
 class WorkbenchBridgeTests(unittest.TestCase):
+    def _write_cover(self, path: Path, size=(1280, 720)):
+        Image.new("RGB", size, color=(23, 45, 67)).save(path)
+
     def test_import_sources_supports_file_folder_and_paste(self):
         from tiandi_engine.workbench.bridge import import_sources
 
@@ -92,7 +106,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
             (base / "themes").mkdir()
             (base / "themes" / "night.json").write_text('{"name": "Night Theme"}', encoding="utf-8")
             (base / "covers").mkdir()
-            (base / "covers" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            self._write_cover(base / "covers" / "a.png")
 
             payload = discover_resources(base)
 
@@ -209,7 +223,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
             (base / "themes").mkdir()
             (base / "themes" / "night.json").write_text('{"name": "Night Theme"}', encoding="utf-8")
             (base / "covers").mkdir()
-            (base / "covers" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            self._write_cover(base / "covers" / "a.png")
 
             imported = import_sources(base, import_mode="paste", pasted_text="桥接标题\n\n桥接正文")
             plan = plan_publish_job(
@@ -227,6 +241,88 @@ class WorkbenchBridgeTests(unittest.TestCase):
             self.assertTrue(staged_path.is_file())
             self.assertIn("桥接标题", staged_path.read_text(encoding="utf-8"))
             self.assertTrue(any(item["platform"] == "zhihu" for item in plan["context_map"]))
+
+    def test_plan_publish_job_includes_publish_option_modes_in_context_map(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "themes").mkdir()
+            (base / "themes" / "night.json").write_text('{"name": "Night Theme"}', encoding="utf-8")
+            (base / "covers").mkdir()
+            self._write_cover(base / "covers" / "a.png")
+            imported = import_sources(base, import_mode="paste", pasted_text="桥接标题\n\n桥接正文")
+
+            plan = plan_publish_job(
+                base,
+                drafts=imported["job"]["drafts"],
+                platforms=["zhihu"],
+                mode="draft",
+                cover_mode="force_off",
+                ai_declaration_mode="force_off",
+            )
+
+        self.assertEqual(plan["cover_assignments"], [])
+        self.assertEqual(plan["context_map"][0]["cover_mode"], "force_off")
+        self.assertEqual(plan["context_map"][0]["ai_declaration_mode"], "force_off")
+
+    def test_plan_publish_job_includes_scheduled_publish_at_for_toutiao_publish(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            imported = import_sources(base, import_mode="paste", pasted_text="桥接标题\n\n桥接正文")
+
+            plan = plan_publish_job(
+                base,
+                drafts=imported["job"]["drafts"],
+                platforms=["toutiao", "zhihu"],
+                mode="publish",
+                scheduled_publish_at="2026-03-30T09:30",
+            )
+
+        self.assertEqual(plan["scheduled_publish_at"], "2026-03-30T09:30")
+        self.assertEqual(plan["publish_job"]["scheduled_publish_at"], "2026-03-30T09:30")
+        toutiao_context = next(item for item in plan["context_map"] if item["platform"] == "toutiao")
+        zhihu_context = next(item for item in plan["context_map"] if item["platform"] == "zhihu")
+        self.assertEqual(toutiao_context["scheduled_publish_at"], "2026-03-30T09:30")
+        self.assertIsNone(zhihu_context["scheduled_publish_at"])
+
+    def test_plan_publish_job_skips_cover_assignment_for_jianshu_boundary(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "covers").mkdir()
+            self._write_cover(base / "covers" / "a.png")
+            imported = import_sources(base, import_mode="paste", pasted_text="桥接标题\n\n桥接正文")
+
+            plan = plan_publish_job(
+                base,
+                drafts=imported["job"]["drafts"],
+                platforms=["jianshu"],
+                mode="publish",
+                cover_mode="auto",
+            )
+
+        self.assertEqual(plan["cover_assignments"], [])
+        self.assertIsNone(plan["context_map"][0]["cover_path"])
+
+    def test_plan_publish_job_blocks_force_on_cover_when_pool_missing(self):
+        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            imported = import_sources(base, import_mode="paste", pasted_text="桥接标题\n\n桥接正文")
+
+            with self.assertRaisesRegex(ValueError, "封面"):
+                plan_publish_job(
+                    base,
+                    drafts=imported["job"]["drafts"],
+                    platforms=["zhihu"],
+                    mode="draft",
+                    cover_mode="force_on",
+                )
 
     def test_run_publish_job_emits_structured_events(self):
         from tiandi_engine.workbench.bridge import import_sources, plan_publish_job, run_publish_job
@@ -316,6 +412,60 @@ class WorkbenchBridgeTests(unittest.TestCase):
 
         self.assertEqual(len(result["results"]), 2)
         self.assertEqual([item["platform"] for item in result["results"]], ["zhihu", "wechat"])
+
+    def test_run_publish_job_passes_scheduled_publish_at_to_adapter(self):
+        from tiandi_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            article = base / "article.md"
+            article.write_text("# 标题\n\n正文", encoding="utf-8")
+            registry = {
+                "toutiao": DummyAdapter(
+                    base_dir=base,
+                    platform="toutiao",
+                    returncode=0,
+                    stdout="已设置定时发布",
+                )
+            }
+            plan = {
+                "publish_job": {
+                    "job_id": "scheduled-job",
+                    "article_ids": ["article"],
+                    "platforms": ["toutiao"],
+                    "status": "pending",
+                    "current_step": "",
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "skip_count": 0,
+                    "recoverable": True,
+                    "error_summary": "",
+                    "scheduled_publish_at": "2026-03-30T09:30",
+                },
+                "mode": "publish",
+                "continue_on_error": False,
+                "drafts": [
+                    {"article_id": "article", "title": "标题", "body_markdown": "# 标题", "source_path": None, "source_kind": "markdown"}
+                ],
+                "staged_articles": [{"article_id": "article", "markdown_path": str(article)}],
+                "context_map": [
+                    {
+                        "article_id": "article",
+                        "platform": "toutiao",
+                        "markdown_path": str(article),
+                        "theme_name": None,
+                        "template_mode": "default",
+                        "cover_path": None,
+                        "cover_mode": "auto",
+                        "ai_declaration_mode": "auto",
+                        "scheduled_publish_at": "2026-03-30T09:30",
+                    }
+                ],
+            }
+
+            result = run_publish_job(base, plan, registry=registry)
+
+        self.assertEqual(result["results"][0]["scheduled_publish_at"], "2026-03-30T09:30")
 
     def test_run_publish_job_uses_failed_summary_when_continue_on_error_finishes_late_success(self):
         from tiandi_engine.workbench.bridge import run_publish_job
@@ -732,6 +882,36 @@ class WorkbenchBridgeTests(unittest.TestCase):
             self.assertIn("article_id", content)
             self.assertIn("article-1", content)
             self.assertIn('"type": "command_result"', stdout.getvalue())
+
+    def test_packaged_bridge_discover_resources_works_from_minimal_runtime_layout(self):
+        manifest = json.loads((Path(__file__).resolve().parent.parent / "desktop" / "runtime-manifest.json").read_text(encoding="utf-8"))
+        repo_root = Path(__file__).resolve().parent.parent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_repo = Path(tmp) / "repo"
+            runtime_repo.mkdir(parents=True)
+            for relative in manifest["include"]:
+                source = repo_root / relative
+                target = runtime_repo / relative
+                if source.is_dir():
+                    shutil.copytree(source, target, dirs_exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+
+            proc = subprocess.run(
+                [sys.executable, str(runtime_repo / "scripts" / "workbench_bridge.py")],
+                input=json.dumps({"command": "discover_resources"}),
+                text=True,
+                capture_output=True,
+                cwd=tmp,
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["runtime"]["repo_root"], str(runtime_repo.resolve()))
+        self.assertIn("theme_pool", payload)
+        self.assertIn("cover_pool", payload)
 
 
 if __name__ == "__main__":

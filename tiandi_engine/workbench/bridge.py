@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
@@ -24,9 +25,10 @@ LAST_RESULT_PATH = WORKBENCH_ROOT / "last-result.json"
 SESSION_PATH = Path(".tiandidistribute") / "publish-console" / "publish-console-session.json"
 BROWSER_SESSION_STATE_PATH = Path(".tiandidistribute") / "browser-session" / "state.json"
 RECORDS_PATH = Path("publish_records.csv")
-SUCCESS_STATUSES = {"published", "draft_only", "success_unknown"}
+SUCCESS_STATUSES = {"published", "scheduled", "draft_only", "success_unknown"}
 SKIP_STATUSES = {"skipped_existing"}
 BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian")
+PUBLISH_OPTION_MODES = {"auto", "force_on", "force_off"}
 REPO_IDENTITY_MARKERS = (
     Path("scripts") / "workbench_bridge.py",
     Path("publish.py"),
@@ -150,6 +152,26 @@ def _browser_session_state_payload(base_dir: Path, config) -> Mapping[str, objec
         "expiring_platforms": expiring_platforms,
         "relogin_required_platforms": relogin_required_platforms,
     }
+
+
+def _normalize_publish_option_mode(value, *, field_name: str) -> str:
+    mode = str(value or "auto")
+    if mode not in PUBLISH_OPTION_MODES:
+        raise ValueError(f"{field_name} 仅支持: auto / force_on / force_off")
+    return mode
+
+
+def _normalize_scheduled_publish_at(value) -> Optional[str]:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError("scheduled_publish_at 必须是 ISO 本地时间，例如 2026-03-30T09:30") from exc
+    return parsed.strftime("%Y-%m-%dT%H:%M")
 
 
 def _read_csv_records_state(path: Path):
@@ -382,6 +404,9 @@ def discover_resources(base_dir):
         "defaults": {
             "template_mode": config.get_default_template_mode(),
             "cover_repeat_window": config.get_cover_repeat_window(),
+            "cover_mode": "auto",
+            "ai_declaration_mode": "auto",
+            "scheduled_publish_at": None,
         },
     }
 
@@ -396,6 +421,9 @@ def plan_publish_job(
     template_mode: Optional[str] = None,
     manual_theme_by_article: Optional[Mapping[str, str]] = None,
     manual_cover_by_article_platform: Optional[Mapping[str, str]] = None,
+    cover_mode: str = "auto",
+    ai_declaration_mode: str = "auto",
+    scheduled_publish_at: Optional[str] = None,
     seed: Optional[int] = None,
     recent_cover_paths: Optional[Sequence[str]] = None,
     job_id: Optional[str] = None,
@@ -403,6 +431,11 @@ def plan_publish_job(
 ):
     root = _ensure_base_dir(base_dir)
     config = load_engine_config(root)
+    normalized_cover_mode = _normalize_publish_option_mode(cover_mode, field_name="cover_mode")
+    normalized_ai_declaration_mode = _normalize_publish_option_mode(
+        ai_declaration_mode, field_name="ai_declaration_mode"
+    )
+    normalized_scheduled_publish_at = _normalize_scheduled_publish_at(scheduled_publish_at)
     draft_objects = tuple(_coerce_draft(item) for item in drafts)
     article_ids = tuple(draft.article_id for draft in draft_objects)
     selected_platforms = tuple(str(platform) for platform in platforms)
@@ -421,7 +454,7 @@ def plan_publish_job(
         )
 
     cover_assignments = ()
-    if any(platform in COVER_PLATFORMS for platform in selected_platforms):
+    if normalized_cover_mode != "force_off" and any(platform in COVER_PLATFORMS for platform in selected_platforms):
         cover_pool = config.discover_cover_pool()
         if cover_pool.get("ok"):
             cover_assignments = assign_covers(
@@ -432,7 +465,16 @@ def plan_publish_job(
                 repeat_window=config.get_cover_repeat_window(),
                 seed=seed,
             )
-    cover_assignments = _apply_manual_cover_overrides(cover_assignments, manual_cover_by_article_platform)
+    if normalized_cover_mode != "force_off":
+        cover_assignments = _apply_manual_cover_overrides(cover_assignments, manual_cover_by_article_platform)
+    required_cover_pairs = {
+        (draft.article_id, platform) for draft in draft_objects for platform in selected_platforms if platform in COVER_PLATFORMS
+    }
+    assigned_cover_pairs = {
+        (item.article_id, item.platform) for item in cover_assignments if item.cover_path is not None
+    }
+    if normalized_cover_mode == "force_on" and required_cover_pairs - assigned_cover_pairs:
+        raise ValueError("当前已明确要求启用封面，但可用封面池或手动封面覆盖不足，请先补齐封面资源。")
 
     template_by_article = {item.article_id: item for item in template_assignments}
     enriched_drafts = []
@@ -463,6 +505,11 @@ def plan_publish_job(
                     "theme_name": assignment.theme_id if assignment else None,
                     "template_mode": assignment.template_mode if assignment else assignment_mode,
                     "cover_path": str(cover_assignment.cover_path) if cover_assignment and cover_assignment.cover_path else None,
+                    "cover_mode": normalized_cover_mode,
+                    "ai_declaration_mode": normalized_ai_declaration_mode,
+                    "scheduled_publish_at": (
+                        normalized_scheduled_publish_at if mode == "publish" and platform == "toutiao" else None
+                    ),
                 }
             )
 
@@ -471,11 +518,15 @@ def plan_publish_job(
         article_ids=tuple(draft.article_id for draft in enriched_drafts),
         platforms=selected_platforms,
         status="pending",
+        scheduled_publish_at=normalized_scheduled_publish_at if mode == "publish" else None,
     )
     plan_payload = {
         "publish_job": publish_job.to_dict(),
         "mode": mode,
         "continue_on_error": bool(continue_on_error),
+        "cover_mode": normalized_cover_mode,
+        "ai_declaration_mode": normalized_ai_declaration_mode,
+        "scheduled_publish_at": normalized_scheduled_publish_at if mode == "publish" else None,
         "drafts": [draft.to_dict() for draft in enriched_drafts],
         "template_assignments": [item.to_dict() for item in template_assignments],
         "cover_assignments": [item.to_dict() for item in cover_assignments],
@@ -569,6 +620,9 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
             cover_path=context.get("cover_path"),
             template_mode=context.get("template_mode"),
             article_id=article_id,
+            cover_mode=context.get("cover_mode"),
+            ai_declaration_mode=context.get("ai_declaration_mode"),
+            scheduled_publish_at=context.get("scheduled_publish_at"),
             registry=registry,
         )
         result["article"] = context["markdown_path"]
@@ -722,6 +776,9 @@ def handle_bridge_command(base_dir, payload, *, registry=None, append_record=Non
             template_mode=payload.get("template_mode"),
             manual_theme_by_article=payload.get("manual_theme_by_article"),
             manual_cover_by_article_platform=payload.get("manual_cover_by_article_platform"),
+            cover_mode=payload.get("cover_mode", "auto"),
+            ai_declaration_mode=payload.get("ai_declaration_mode", "auto"),
+            scheduled_publish_at=payload.get("scheduled_publish_at"),
             seed=payload.get("seed"),
             recent_cover_paths=payload.get("recent_cover_paths"),
             job_id=payload.get("job_id"),
