@@ -190,16 +190,21 @@ npm run tauri:dev
 3. 填写微信 `AppID`、`Secret`、`Author`
 4. 保存后再开始导入文章并发布
 
-### 桌面打包预览
+### 桌面独立打包
 
-当前桌面壳已经可以构建开发预览包：
+当前桌面壳已经支持构建内嵌最小 Python 与 Node 运行时的独立 `.app`：
 
 ```bash
 cd desktop
 npm run tauri:build
 ```
 
-如果你希望把构建出来的桌面壳指向一个明确的引擎仓库目录，可在启动前设置：
+说明：
+
+- `tauri:build` 之前会自动执行 `npm run prepare:runtime`，将精简后的 Python 和 Node 运行时打包到 `desktop/runtime-dist/ordo-runtime`。
+- 构建出的 `.app` 在首次启动时，会自动将内置的 `ordo-runtime` 解压到用户的 `~/Library/Application Support/com.ordo.workbench/ordo-runtime` 目录下。
+- 这是一个**真正独立的桌面应用**，不再依赖你本机的 Python 环境或源码仓库路径。
+- 如果你是开发者，希望在开发模式下指向本地源码仓库，可在启动前设置环境变量：
 
 ```bash
 export ORDO_REPO_ROOT=/path/to/tiandidistribute
@@ -207,13 +212,6 @@ export ORDO_PYTHON=/path/to/python
 cd desktop
 npm run tauri:dev
 ```
-
-说明：
-
-- 当前打包产物更适合作为“开发预览 / 内测包”，尚不是完全独立、内嵌 Python 引擎的一键安装版
-- `ORDO_REPO_ROOT` 用于让桌面壳在非源码目录启动时，仍能找到 `scripts/workbench_bridge.py`
-- 如果仓库根目录或 Python 解释器定位失败，桌面壳会直接提示如何设置 `ORDO_REPO_ROOT` / `ORDO_PYTHON`
-- 当前 `tauri.conf.json` 仍以 `.app` 级别产物为主，Windows 安装器与正式分发流程仍属于后续阶段
 
 ### 微信本地预览
 
@@ -346,12 +344,11 @@ python3 reply_comments.py --dry-run
 
 ## 当前仍未完成
 
-- 独立安装包：当前桌面包仍依赖本机 Python 和引擎仓库，不是完全独立的安装版
-- 正式 Windows 分发：当前明确以 `macOS` 为优先收口平台；Windows 浏览器适配、安装器、签名和分发流程仍在后续阶段
-- 产品级恢复：当前是“最近计划/结果快照 + 失败项续跑”的最小闭环，还不是完整断点续跑系统
-- 密钥与本地数据安全：`secrets.env`、`config.json`、`publish_records.csv` 仍属于本地工程态存储，后续如要正式分发还需要单独治理
-- 长时间 soak / 批量压测：当前已完成功能主线真实验收，但更长时段的稳定性压测与风控边界观察仍可继续补
-- 自带浏览器运行时与 UI 重设计：当前阶段都明确后置，继续坚持“托管系统浏览器 + 小巧路线”
+- 独立安装包体验：当前已实现内嵌 Python/Node 的独立 `.app`，但尚未提供 `DMG` 安装器或代码签名/公证（Notarization），分发时可能触发 macOS Gatekeeper 拦截。
+- 正式 Windows 分发：当前明确以 `macOS` 为优先收口平台；Windows 浏览器适配、安装器、签名和分发流程仍在后续阶段。
+- 产品级恢复：当前是“最近计划/结果快照 + 失败项续跑”的最小闭环，还不是完整断点续跑系统。
+- 密钥与本地数据安全：`secrets.env`、`config.json`、`publish_records.csv` 仍属于本地明文存储，后续如要正式分发还需要单独的加密与隐私治理。
+- 长时间 soak / 批量压测：当前已完成功能主线真实验收，但更长时段的稳定性压测与风控边界观察仍可继续补。
 
 ## 常用 CDP 命令
 
