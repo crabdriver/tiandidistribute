@@ -839,10 +839,16 @@ function renderModal() {
             <p>先确定全局模板模式，再在主界面逐篇覆盖。</p>
             <label class="field">
               <span>模板模式</span>
-              <select id="modal-template-mode-select">
-                <option value="default" ${state.templateMode === 'default' ? 'selected' : ''}>默认随机</option>
-                <option value="custom" ${state.templateMode === 'custom' ? 'selected' : ''}>逐篇自定义</option>
-              </select>
+          <div class="segmented-control">
+            <label>
+              <input type="radio" name="modal-template-mode" value="default" ${state.templateMode === 'default' ? 'checked' : ''}>
+              <span>默认随机</span>
+            </label>
+            <label>
+              <input type="radio" name="modal-template-mode" value="custom" ${state.templateMode === 'custom' ? 'checked' : ''}>
+              <span>逐篇自定义</span>
+            </label>
+          </div>
             </label>
           </div>
           <div class="modal__actions">
@@ -906,9 +912,9 @@ function render() {
           <div class="logo-placeholder"></div>
           <strong>Ordo Workbench</strong>
         </div>
-        <div class="topbar__steps">
-          <span>Import</span> → <span>Configure</span> → <span>Publish</span> → <span>Review</span>
-        </div>
+  <div class="topbar__steps">
+    <span>导入</span> → <span>配置</span> → <span>发布</span> → <span>回看</span>
+  </div>
         <div class="topbar__actions">
           <span class="status-chip ${wechatStatus().appid_ready && wechatStatus().secret_ready ? 'is-ready' : 'is-pending'}">
             ${describeWechatStatus(wechatStatus())}
@@ -1067,14 +1073,15 @@ function bindEvents() {
     }
   })
 
-  const modalTemplateModeSelect = app.querySelector<HTMLSelectElement>('#modal-template-mode-select')
-  if (modalTemplateModeSelect) {
-    modalTemplateModeSelect.onchange = async () => {
-      state.templateMode = modalTemplateModeSelect.value
-      await replanPublishJob()
-      render()
+  app.querySelectorAll<HTMLInputElement>('input[name="modal-template-mode"]').forEach((input) => {
+    input.onchange = async () => {
+      if (input.checked) {
+        state.templateMode = input.value
+        await replanPublishJob()
+        render()
+      }
     }
-  }
+  })
 
   const themeSelect = app.querySelector<HTMLSelectElement>('#theme-select')
   if (themeSelect && state.selectedArticleId) {
