@@ -26,7 +26,6 @@ import type {
   ThemeEntry,
   WechatConfigStatus,
 } from './types'
-import { describeCoverPoolStatus } from './coverStatus'
 import { compactHistoryPayload, compactPublishResult } from './publishResultMemory'
 import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
 import { buildWechatBlockingMessage } from './wechatStatus'
@@ -537,7 +536,7 @@ function renderHistoryPanel() {
   const canRestoreFailures = Boolean(lastPlan && lastResult && hasFailedResults(lastResult))
 
   if (!lastPlan && records.length === 0 && !sessionSummary) {
-    return '<div class="empty-inline">最近结果会在这里显示。</div>'
+    return ''
   }
 
   const latestTask = lastPlan
@@ -656,13 +655,9 @@ function renderCoverPanel(article: ArticleDraft | null) {
   const coverPool = state.resources?.cover_pool
   const selected = selectedPlatforms()
   return `
-    <section class="panel">
-      <h3>封面与平台</h3>
-      <div class="cover-pool-status ${coverPool?.ok ? 'is-ready' : 'is-warning'}">
-        <strong>封面池</strong>
-        <span>${escapeHtml(describeCoverPoolStatus(coverPool))}</span>
-      </div>
-      <div class="platform-grid">
+    <section class="panel panel--covers">
+      <h3>封面预览</h3>
+      <div class="platform-grid" style="margin-top: 8px;">
         ${ALL_PLATFORMS.map((platform) => {
           const key = article ? `${article.article_id}:${platform}` : ''
           const value = key ? state.manualCoverByArticlePlatform[key] ?? '' : ''
@@ -790,9 +785,7 @@ function renderLogs() {
       <div class="panel__head">
         <div>
           <h3>日志与状态</h3>
-          <p>${escapeHtml(state.status)}</p>
         </div>
-        <button class="ghost-button" data-action="refresh">刷新</button>
       </div>
       <div class="log-list">
         ${(state.logs.length ? state.logs : ['等待执行日志…'])
@@ -927,14 +920,22 @@ function render() {
           <div class="logo-placeholder"></div>
           <strong>Ordo</strong>
         </div>
-  <div class="topbar__steps">
-    <span>导入</span> → <span>配置</span> → <span>发布</span> → <span>回看</span>
-  </div>
         <div class="topbar__actions">
-          <button class="ghost-button" data-action="open-settings-modal">设置</button>
-          <button class="ghost-button" data-action="open-paste-modal">粘贴导入</button>
-          <button class="ghost-button" data-action="import-file">单文件</button>
-          <button class="ghost-button" data-action="import-folder">文件夹</button>
+          <button class="icon-button" data-action="open-settings-modal" title="设置">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </button>
+          <button class="icon-button" data-action="open-paste-modal" title="粘贴导入">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+          </button>
+          <div class="dropdown">
+            <button class="icon-button" title="导入文件/文件夹">
+              <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            </button>
+            <div class="dropdown-menu">
+              <button class="dropdown-item" data-action="import-file">导入单文件</button>
+              <button class="dropdown-item" data-action="import-folder">导入文件夹</button>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -942,20 +943,22 @@ function render() {
 
       <main class="workbench">
         <aside class="column column--left">
-          <section class="panel">
+          <section class="panel panel--articles">
             <div class="panel__head">
               <div>
                 <h3>文章列表</h3>
-                <p>${state.importJob ? `${state.importJob.article_count} 篇已导入` : '尚未导入文章'}</p>
               </div>
-              <button class="ghost-button" data-action="refresh">刷新资源</button>
+              <button class="icon-button" data-action="refresh" title="刷新资源">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+              </button>
             </div>
             ${renderArticleList()}
           </section>
-          <section class="panel">
+          <section class="panel panel--history">
             <h3>最近结果</h3>
             ${renderHistoryPanel()}
           </section>
+          ${renderLogs()}
         </aside>
 
         <section class="column column--center">
@@ -969,7 +972,6 @@ function render() {
         </aside>
       </main>
 
-      ${renderLogs()}
       ${renderModal()}
     </div>
   `

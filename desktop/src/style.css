@@ -24,6 +24,8 @@ body {
   color: var(--color-text-main);
   font-family: system-ui, -apple-system, sans-serif;
   margin: 0;
+  height: 100vh;
+  overflow: hidden;
 }
 
 button,
@@ -38,15 +40,17 @@ button {
 }
 
 #app {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .shell {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
-  gap: 16px;
-  padding: 20px;
+  height: 100vh;
+  overflow: hidden;
+  gap: 12px;
+  padding: 12px 20px;
 }
 
 .topbar {
@@ -116,6 +120,64 @@ button {
   width: auto;
 }
 
+.icon-button {
+  background: transparent;
+  border: none;
+  padding: 8px;
+  border-radius: 8px;
+  color: var(--color-text-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.icon-button:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--color-text-main);
+}
+
+.dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background: var(--color-bg-panel);
+  box-shadow: var(--shadow-modal);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  z-index: 100;
+  flex-direction: column;
+  min-width: 140px;
+  overflow: hidden;
+  padding: 4px;
+}
+
+.dropdown:hover .dropdown-menu {
+  display: flex;
+}
+
+.dropdown-item {
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-main);
+  border-radius: 8px;
+  transition: background 0.2s ease;
+}
+
+.dropdown-item:hover {
+  background: var(--color-bg-app);
+}
+
 .ghost-button,
 .primary-button {
   border: 1px solid var(--color-border);
@@ -183,6 +245,7 @@ button {
   display: grid;
   grid-template-columns: 280px minmax(420px, 1fr) 340px;
   gap: 16px;
+  min-height: 0;
 }
 
 .column {
@@ -190,6 +253,7 @@ button {
   flex-direction: column;
   gap: 16px;
   min-height: 0;
+  height: 100%;
 }
 
 .panel {
@@ -204,18 +268,28 @@ button {
   min-height: 0;
 }
 
+.panel--articles { flex: 3; }
+.panel--history { flex: 2; }
+.panel--logs { flex: 3; }
+.panel--preview { flex: 1; }
+.panel--covers { flex: 1; }
+.panel--execution { flex: 0 0 auto; }
+
 .panel__head {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
+  flex-shrink: 0;
 }
 
 .article-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow: auto;
+  overflow-y: auto;
+  flex: 1;
+  padding-right: 4px;
 }
 
 .article-card {
@@ -322,8 +396,8 @@ textarea {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: 16px;
-  overflow: auto;
-  min-height: 260px;
+  overflow-y: auto;
+  flex: 1;
   color: var(--color-text-main);
 }
 
@@ -414,16 +488,15 @@ textarea {
 }
 
 .panel--logs {
-  min-height: 220px;
+  flex: 2;
 }
 
 .log-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  overflow: auto;
-  min-height: 130px;
-  max-height: 240px;
+  overflow-y: auto;
+  flex: 1;
   padding-right: 6px;
 }
 
