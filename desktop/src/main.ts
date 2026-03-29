@@ -563,13 +563,19 @@ function renderTemplatePanel(article: ArticleDraft | null) {
         </div>
         <button class="ghost-button" data-action="open-theme-modal">批量设置</button>
       </div>
-      <label class="field">
+      <div class="field">
         <span>全局模板模式</span>
-        <select id="template-mode-select">
-          <option value="default" ${state.templateMode === 'default' ? 'selected' : ''}>默认随机</option>
-          <option value="custom" ${state.templateMode === 'custom' ? 'selected' : ''}>逐篇自定义</option>
-        </select>
-      </label>
+        <div class="segmented-control" id="template-mode-segment">
+          <label class="segmented-control__item">
+            <input type="radio" name="template-mode" value="default" ${state.templateMode === 'default' ? 'checked' : ''}>
+            <span>默认随机</span>
+          </label>
+          <label class="segmented-control__item">
+            <input type="radio" name="template-mode" value="custom" ${state.templateMode === 'custom' ? 'checked' : ''}>
+            <span>逐篇自定义</span>
+          </label>
+        </div>
+      </div>
       ${
         article
           ? `
@@ -1046,13 +1052,14 @@ function bindEvents() {
     }
   }
 
-  const templateModeSelect = app.querySelector<HTMLSelectElement>('#template-mode-select')
-  if (templateModeSelect) {
-    templateModeSelect.onchange = async () => {
-      state.templateMode = templateModeSelect.value
-      await replanPublishJob()
+  app.querySelectorAll<HTMLInputElement>('input[name="template-mode"]').forEach((input) => {
+    input.onchange = async () => {
+      if (input.checked) {
+        state.templateMode = input.value
+        await replanPublishJob()
+      }
     }
-  }
+  })
 
   const modalTemplateModeSelect = app.querySelector<HTMLSelectElement>('#modal-template-mode-select')
   if (modalTemplateModeSelect) {
