@@ -815,7 +815,9 @@ function renderModal() {
             <h3>粘贴导入</h3>
             <button class="ghost-button" data-action="close-paste-modal">关闭</button>
           </div>
-          <textarea id="paste-input" placeholder="把正文粘贴到这里，第一行会被识别为标题。">${escapeHtml(state.pasteText)}</textarea>
+          <div class="modal__body">
+            <textarea id="paste-input" placeholder="把正文粘贴到这里，第一行会被识别为标题。">${escapeHtml(state.pasteText)}</textarea>
+          </div>
           <div class="modal__actions">
             <button class="ghost-button" data-action="close-paste-modal">取消</button>
             <button class="primary-button" data-action="confirm-paste-import">导入</button>
@@ -833,14 +835,16 @@ function renderModal() {
             <h3>全局模板选择</h3>
             <button class="ghost-button" data-action="close-theme-modal">完成</button>
           </div>
-          <p class="modal__body">先确定全局模板模式，再在主界面逐篇覆盖。</p>
-          <label class="field">
-            <span>模板模式</span>
-            <select id="modal-template-mode-select">
-              <option value="default" ${state.templateMode === 'default' ? 'selected' : ''}>默认随机</option>
-              <option value="custom" ${state.templateMode === 'custom' ? 'selected' : ''}>逐篇自定义</option>
-            </select>
-          </label>
+          <div class="modal__body">
+            <p>先确定全局模板模式，再在主界面逐篇覆盖。</p>
+            <label class="field">
+              <span>模板模式</span>
+              <select id="modal-template-mode-select">
+                <option value="default" ${state.templateMode === 'default' ? 'selected' : ''}>默认随机</option>
+                <option value="custom" ${state.templateMode === 'custom' ? 'selected' : ''}>逐篇自定义</option>
+              </select>
+            </label>
+          </div>
           <div class="modal__actions">
             <button class="primary-button" data-action="close-theme-modal">确认</button>
           </div>
@@ -857,25 +861,27 @@ function renderModal() {
             <h3>微信发布设置</h3>
             <button class="ghost-button" data-action="close-settings-modal">关闭</button>
           </div>
-          <p class="modal__body">把微信发布到草稿箱需要的 AppID、Secret、Author 直接贴到这里即可，保存后工作台会立即刷新状态。</p>
-          ${
-            state.wechatSettingsLoading
-              ? '<div class="empty-inline">正在读取当前微信配置…</div>'
-              : `
-                <label class="field">
-                  <span>微信 AppID</span>
-                  <input id="wechat-appid-input" type="text" value="${escapeHtml(state.wechatSettings.appId)}" placeholder="例如 wx1234567890" />
-                </label>
-                <label class="field">
-                  <span>微信 Secret</span>
-                  <input id="wechat-secret-input" type="password" value="${escapeHtml(state.wechatSettings.secret)}" placeholder="请输入微信 Secret" />
-                </label>
-                <label class="field">
-                  <span>作者名</span>
-                  <input id="wechat-author-input" type="text" value="${escapeHtml(state.wechatSettings.author)}" placeholder="发布时默认作者名" />
-                </label>
-              `
-          }
+          <div class="modal__body">
+            <p>把微信发布到草稿箱需要的 AppID、Secret、Author 直接贴到这里即可，保存后工作台会立即刷新状态。</p>
+            ${
+              state.wechatSettingsLoading
+                ? '<div class="empty-inline">正在读取当前微信配置…</div>'
+                : `
+                  <label class="field">
+                    <span>微信 AppID</span>
+                    <input id="wechat-appid-input" type="text" value="${escapeHtml(state.wechatSettings.appId)}" placeholder="例如 wx1234567890" />
+                  </label>
+                  <label class="field">
+                    <span>微信 Secret</span>
+                    <input id="wechat-secret-input" type="password" value="${escapeHtml(state.wechatSettings.secret)}" placeholder="请输入微信 Secret" />
+                  </label>
+                  <label class="field">
+                    <span>作者名</span>
+                    <input id="wechat-author-input" type="text" value="${escapeHtml(state.wechatSettings.author)}" placeholder="发布时默认作者名" />
+                  </label>
+                `
+            }
+          </div>
           <div class="modal__actions">
             <button class="ghost-button" data-action="close-settings-modal" ${state.wechatSettingsSaving ? 'disabled' : ''}>取消</button>
             <button class="primary-button" data-action="save-wechat-settings" ${state.wechatSettingsSaving || state.wechatSettingsLoading ? 'disabled' : ''}>

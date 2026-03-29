@@ -457,7 +457,8 @@ textarea {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(9, 12, 18, 0.72);
+  background: rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(8px);
   display: grid;
   place-items: center;
   padding: 20px;
@@ -467,11 +468,11 @@ textarea {
   width: min(720px, 100%);
   background: var(--color-bg-panel);
   border: 1px solid var(--color-border);
-  border-radius: 20px;
-  padding: 20px;
+  border-radius: var(--radius-lg);
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;
   box-shadow: var(--shadow-modal);
 }
 
@@ -483,8 +484,14 @@ textarea {
 }
 
 .modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.modal__body p {
   margin: 0;
-  color: var(--muted);
+  color: var(--color-text-subtle);
 }
 
 .segmented-control {
